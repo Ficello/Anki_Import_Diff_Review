@@ -77,6 +77,7 @@ from .editor_sync import (
 
 _pending_diffs: Dict[int, NoteDiff] = {}   # note_id → NoteDiff
 _on_commit_cb = None                        # callable appelé au commit
+_is_collab_session: Optional[bool] = None    # None/True par défaut, False explicitement pour les imports de fichiers
 _browser_panel: Optional["DiffBrowserPanel"] = None
 _field_edit_hook = None                     # hook editor_did_unfocus_field
 _committed = False
@@ -100,17 +101,18 @@ def _get_editor_note(editor):
     return None
 
 
-def set_pending_diffs(diffs: List[NoteDiff], on_commit) -> None:
+def set_pending_diffs(diffs: List[NoteDiff], on_commit, is_collab: Optional[bool] = None) -> None:
     """Enregistre les diffs à valider via le browser/éditeur natif."""
-    global _pending_diffs, _on_commit_cb, _committed, _staged_to_orig
+    global _pending_diffs, _on_commit_cb, _committed, _staged_to_orig, _is_collab_session
     _pending_diffs = {d.note_id: d for d in diffs}
     _on_commit_cb = on_commit
     _committed = False
+    _is_collab_session = is_collab
     _staged_to_orig.clear()
 
 
 def clear_pending_diffs() -> None:
-    global _pending_diffs, _on_commit_cb, _browser_panel, _field_edit_hook, _staged_to_orig
+    global _pending_diffs, _on_commit_cb, _browser_panel, _field_edit_hook, _staged_to_orig, _is_collab_session
     try:
         from .temp_link_interceptor import TempLinkInterceptor
         interceptor = TempLinkInterceptor.instance()
@@ -120,6 +122,7 @@ def clear_pending_diffs() -> None:
         pass
     _pending_diffs.clear()
     _on_commit_cb = None
+    _is_collab_session = None
     _staged_to_orig.clear()
 
     # Retirer le hook d'unfocus si installé
@@ -209,15 +212,38 @@ def _stage_insert_notes(diffs: List[NoteDiff]) -> List[int]:
                     note.fields[idx] = val
             note.tags = list(diff.tags)
 
-            # Utiliser le deck capturé depuis le dry-run (ou deck sélectionné par défaut)
-            deck_id = diff.deck_id or 1
+            # Résoudre le deck cible :
+            # 1) Par nom de deck si disponible (recrée le deck au besoin s'il a été rollback par le savepoint)
+            # 2) Par ID de deck s'il existe toujours dans la collection
+            # 3) Fallback sur deck 1 (Par défaut)
+            deck_id = 1
+            if getattr(diff, "deck_name", "") and hasattr(col, "decks"):
+                try:
+                    deck_id = col.decks.id(diff.deck_name)
+                except Exception as e_d:
+                    print(f"[anki-diff] Failed to get/create deck '{diff.deck_name}': {e_d}")
+            elif getattr(diff, "deck_id", 0) and hasattr(col, "decks") and col.decks.get(diff.deck_id, default=False):
+                deck_id = diff.deck_id
+            elif getattr(diff, "deck_id", 0):
+                deck_id = diff.deck_id
+
             col.add_note(note, deck_id)
+
+            # Suspendre automatiquement les cartes si suspend_cards est actif (ex: réglage AnkiCollab auto suspend)
+            if getattr(diff, "suspend_cards", False) and hasattr(col, "sched"):
+                try:
+                    cids = note.card_ids()
+                    if cids:
+                        col.sched.suspend_cards(cids)
+                        print(f"[anki-diff] Staged INSERT: auto-suspended {len(cids)} card(s) for note {note.id}")
+                except Exception as e_susp:
+                    print(f"[anki-diff] Failed to suspend staged cards: {e_susp}")
 
             # Enregistrer le mapping staged_id → original_id
             diff.staged_note_id = note.id
             _staged_to_orig[note.id] = diff.note_id
             staged_nids.append(note.id)
-            print(f"[anki-diff] Staged INSERT: orig_id={diff.note_id} → staged_id={note.id} deck={deck_id}")
+            print(f"[anki-diff] Staged INSERT: orig_id={diff.note_id} → staged_id={note.id} deck={deck_id} (suspended={getattr(diff, 'suspend_cards', False)})")
 
         except Exception as e:
             print(f"[anki-diff] Failed to stage INSERT note {diff.note_id}: {e}")
@@ -254,7 +280,7 @@ def _unstage_insert_notes(diffs_dict: Dict[int, NoteDiff]) -> None:
 
 
 def _get_dock_style() -> str:
-    from .ui import get_colors
+    from .ui import get_colors, is_dark
     c = get_colors()
     return f"""
 QDockWidget, QTabWidget, QStackedWidget, QScrollArea, NoteDiffPanelWithSync {{
@@ -274,7 +300,15 @@ QDockWidget::title {{
     padding: 4px 8px;
     border-bottom: 1px solid {c['border']};
 }}
-QLabel {{ background: transparent; }}
+#diffBrowserPanel QLabel, NoteDiffPanelWithSync QLabel {{ background: transparent; }}
+QToolTip, CustomLabel, QLabel[customTooltip="true"] {{
+    background-color: {('#0f172a' if is_dark() else '#feffc4')};
+    color: {('#f8fafc' if is_dark() else '#000000')};
+    border: 1px solid {('#334155' if is_dark() else '#cbd5e1')};
+    border-radius: 6px;
+    padding: 8px 12px;
+    font-size: 12px;
+}}
 QFrame {{ border: none; }}
 """
 
@@ -297,13 +331,10 @@ def _get_layout_file_path() -> str:
 
 def _load_browser_layout_state() -> dict:
     state = {}
+    cfg = {}
     try:
         if aqt.mw and getattr(aqt.mw, "addonManager", None):
             cfg = aqt.mw.addonManager.getConfig("anki_import_diff") or {}
-            if "only_changed_fields" in cfg:
-                state["only_changed_fields"] = cfg["only_changed_fields"]
-            if "learned_cards_only" in cfg:
-                state["learned_cards_only"] = cfg["learned_cards_only"]
             stored = cfg.get(_BROWSER_STATE_KEY)
             if isinstance(stored, dict) and stored:
                 state.update(stored)
@@ -321,6 +352,17 @@ def _load_browser_layout_state() -> dict:
                         state.update(file_state)
         except Exception as e:
             print(f"[anki-diff] _load_browser_layout_state file error: {e}")
+
+    # Les options explicites de configuration prévalent
+    if "only_changed_fields" in cfg:
+        state["only_changed_fields"] = cfg["only_changed_fields"]
+    elif "only_changed_fields" not in state:
+        state["only_changed_fields"] = True
+
+    if "learned_cards_only" in cfg:
+        state["learned_cards_only"] = cfg["learned_cards_only"]
+    elif "learned_cards_only" not in state:
+        state["learned_cards_only"] = True
 
     return state
 
@@ -407,10 +449,12 @@ def _save_browser_state(browser, editor_diff_splitter=None) -> None:
                 except Exception:
                     pass
             if hasattr(panel_to_check, "_btn_learned_only") and panel_to_check._btn_learned_only is not None:
-                try:
-                    state["learned_cards_only"] = panel_to_check._btn_learned_only.isChecked()
-                except Exception:
-                    pass
+                # Ne persister dans les préférences globales que si la session provient d'AnkiCollab
+                if getattr(panel_to_check, "_is_collab", False):
+                    try:
+                        state["learned_cards_only"] = panel_to_check._btn_learned_only.isChecked()
+                    except Exception:
+                        pass
 
         if not state:
             return
@@ -420,6 +464,8 @@ def _save_browser_state(browser, editor_diff_splitter=None) -> None:
             if aqt.mw and getattr(aqt.mw, "addonManager", None):
                 cfg = aqt.mw.addonManager.getConfig("anki_import_diff") or {}
                 cfg[_BROWSER_STATE_KEY] = state
+                if "learned_cards_only" in state:
+                    cfg["learned_cards_only"] = state["learned_cards_only"]
                 aqt.mw.addonManager.writeConfig("anki_import_diff", cfg)
         except Exception as e:
             print(f"[anki-diff] addonManager.writeConfig error: {e}")
@@ -467,10 +513,10 @@ def _restore_browser_state(browser, editor_diff_splitter=None, default_main_size
         if form_splitter and not sip.isdeleted(form_splitter):
             main_sizes = state.get("main_splitter_sizes")
             total_w = form_splitter.width()
-            if main_sizes and len(main_sizes) == 2 and sum(main_sizes) > 0:
+            if main_sizes and len(main_sizes) == 2 and sum(main_sizes) > 0 and min(main_sizes) >= 80:
                 target_sizes = _scale_sizes(main_sizes, total_w)
                 form_splitter.setSizes(target_sizes)
-            elif default_main_sizes and len(default_main_sizes) == 2 and sum(default_main_sizes) > 0:
+            elif default_main_sizes and len(default_main_sizes) == 2 and sum(default_main_sizes) > 0 and min(default_main_sizes) >= 80:
                 table_w = min(max(default_main_sizes[0], 240), 300)
                 rest_w = max(400, (total_w - table_w) if total_w > table_w else 740)
                 form_splitter.setSizes([table_w, rest_w])
@@ -483,7 +529,7 @@ def _restore_browser_state(browser, editor_diff_splitter=None, default_main_size
         if editor_diff_splitter is not None and not sip.isdeleted(editor_diff_splitter):
             ed_sizes = state.get("editor_diff_sizes")
             ed_total_w = editor_diff_splitter.width()
-            if ed_sizes and len(ed_sizes) == 2 and sum(ed_sizes) > 0:
+            if ed_sizes and len(ed_sizes) == 2 and sum(ed_sizes) > 0 and min(ed_sizes) >= 80:
                 target_ed_sizes = _scale_sizes(ed_sizes, ed_total_w)
                 editor_diff_splitter.setSizes(target_ed_sizes)
             else:
@@ -1047,12 +1093,14 @@ class DiffBrowserPanel(QtWidgets.QWidget):
     Panel de diff docké dans l'explorateur Anki.
     """
 
-    def __init__(self, browser):
+    def __init__(self, browser, is_collab: Optional[bool] = None):
         super().__init__(browser)
         self.setObjectName("diffBrowserPanel")
         self._browser = browser
         if browser is not None:
             browser._diff_panel = self
+        effective_collab = is_collab if is_collab is not None else (_is_collab_session if _is_collab_session is not None else True)
+        self._is_collab: bool = bool(effective_collab)
         self._current_nid: Optional[int] = None
         self._last_diff_nid: Optional[int] = None
         self._current_editor = None  # reference a l'editeur actif dans le browser
@@ -1066,7 +1114,13 @@ class DiffBrowserPanel(QtWidgets.QWidget):
         layout_state = _load_browser_layout_state()
         self._only_changed_fields: bool = layout_state.get("only_changed_fields", True)
         self._changed_only_cb: Optional[QtWidgets.QCheckBox] = None
-        self._learned_cards_only: bool = layout_state.get("learned_cards_only", False)
+        # Règle AnkiCollab vs Import de fichiers :
+        # Le filtre "Cartes déjà apprises" ne s'applique qu'aux diffs de mise à jour AnkiCollab.
+        # Pour les imports de fichiers (apkg, txt...), toutes les cartes sont affichées d'emblée.
+        if self._is_collab:
+            self._learned_cards_only: bool = layout_state.get("learned_cards_only", True)
+        else:
+            self._learned_cards_only = False
         self._btn_learned_only: Optional[QtWidgets.QPushButton] = None
 
         self.setSizePolicy(
@@ -2693,6 +2747,7 @@ class DiffBrowserPanel(QtWidgets.QWidget):
                             # Le champ n'a pas d'edition manuelle active :
                             # la version acceptee du diff est reinjectee dans la note
                             note.fields[idx] = diff.merged_fields.get(field_name, "")
+                note.tags = list(diff.tags)
 
         # 2. Flush des valeurs mergées de chaque panel
         for nid, panel in self._note_panels.items():
@@ -2783,6 +2838,13 @@ class DiffBrowserPanel(QtWidgets.QWidget):
             self._restore_browser_splitter()
             self.cleanup()
 
+    def _apply_all_import_tags(self) -> None:
+        """
+        Applique les tags de l'importation a l'ensemble des notes de la session,
+        independamment de l'acceptation ou du refus de chaque fragment (chunk) de texte.
+        """
+        apply_all_pending_import_tags()
+
     def _continue_commit_all(self):
         total = len(_pending_diffs)
         included_notes = sum(1 for d in _pending_diffs.values() if not d.excluded)
@@ -2791,15 +2853,61 @@ class DiffBrowserPanel(QtWidgets.QWidget):
             aqt.utils.showInfo("Aucune note n'est sélectionnée pour l'import.")
             return
 
-        reply = QtWidgets.QMessageBox.question(
-            self,
-            "Confirmer les modifications",
-            f"Voulez-vous vraiment appliquer les modifications sur {included_notes} note(s) dans votre collection et fermer le navigateur ?",
-            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
-            QtWidgets.QMessageBox.StandardButton.No
+        global _commit_confirmation_hook
+        if _commit_confirmation_hook is not None:
+            hook_res = _commit_confirmation_hook()
+            if isinstance(hook_res, tuple):
+                accepted, accept_all_tags = hook_res
+            else:
+                accepted, accept_all_tags = bool(hook_res), True
+            if not accepted:
+                return
+            if accept_all_tags:
+                self._apply_all_import_tags()
+            self.apply_commit(close_browser=True)
+            return
+
+        msg_box = QtWidgets.QMessageBox(self)
+        msg_box.setWindowTitle("Confirmer les modifications")
+        msg_box.setText(
+            f"Voulez-vous vraiment appliquer les modifications sur {included_notes} note(s) dans votre collection et fermer le navigateur ?"
         )
+        msg_box.setIcon(QtWidgets.QMessageBox.Icon.Question)
+        msg_box.setStandardButtons(
+            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No
+        )
+        msg_box.setDefaultButton(QtWidgets.QMessageBox.StandardButton.No)
+
+        cfg_default_tags = True
+        try:
+            cfg = aqt.mw.addonManager.getConfig("anki_import_diff") or {}
+            cfg_default_tags = cfg.get("accept_all_tags_on_confirm", True)
+        except Exception:
+            pass
+
+        cb_tags = QtWidgets.QCheckBox(
+            "Accepter toutes les modifications de tags sans égard au contenu",
+            msg_box
+        )
+        cb_tags.setChecked(bool(cfg_default_tags))
+        cb_tags.setToolTip(
+            "Si cette case est cochée, les tags proposés par l'importation seront appliqués à toutes les notes,\n"
+            "même si certains fragments de texte (chunks) ou modifications de champs ont été refusés."
+        )
+        msg_box.setCheckBox(cb_tags)
+
+        try:
+            from .ui import _get_style_base
+            msg_box.setStyleSheet(_get_style_base())
+        except Exception:
+            pass
+
+        reply = msg_box.exec()
         if reply != QtWidgets.QMessageBox.StandardButton.Yes:
             return
+
+        if cb_tags.isChecked():
+            self._apply_all_import_tags()
 
         self.apply_commit(close_browser=True)
 
@@ -3079,8 +3187,9 @@ class NoteDiffPanelWithSync(QtWidgets.QScrollArea):
             self._unchanged_toggle_btn.setVisible(False)
 
     def _on_tags_changed(self) -> None:
-        editor = self._browser_panel.get_editor_for_note(self._diff.note_id)
+        editor = self._browser_panel.get_editor_for_note(self._diff.note_id) or getattr(self, "_editor", None)
         if editor:
+            self._editor = editor
             sync_tags_to_editor(editor, self._diff.tags)
         self._browser_panel._update_status()
 
@@ -3114,7 +3223,7 @@ class NoteDiffPanelWithSync(QtWidgets.QScrollArea):
                 self._diff.merged_fields[fname] = self._diff.custom_edit_fields[fname]
             else:
                 self._diff.merged_fields[fname] = fp.get_merged_value()
-        editor = self._browser_panel.get_editor_for_note(self._diff.note_id)
+        editor = self._browser_panel.get_editor_for_note(self._diff.note_id) or getattr(self, "_editor", None)
         if editor:
             self._editor = editor
             sync_editor_from_hunks(editor, self._diff)
@@ -3132,7 +3241,7 @@ class NoteDiffPanelWithSync(QtWidgets.QScrollArea):
         for fp in self._field_panels.values():
             fp.setEnabled(checked)
         
-        editor = self._browser_panel.get_editor_for_note(self._diff.note_id)
+        editor = self._browser_panel.get_editor_for_note(self._diff.note_id) or getattr(self, "_editor", None)
         if editor:
             self._editor = editor
             sync_editor_from_hunks(editor, self._diff)
@@ -3182,8 +3291,9 @@ class NoteDiffPanelWithSync(QtWidgets.QScrollArea):
         if hasattr(self, "_tags_panel") and self._tags_panel:
             self._tags_panel.refresh()
 
-        editor = self._browser_panel.get_editor_for_note(self._diff.note_id)
+        editor = self._browser_panel.get_editor_for_note(self._diff.note_id) or getattr(self, "_editor", None)
         if editor:
+            self._editor = editor
             sync_tags_to_editor(editor, self._diff.tags)
         self._browser_panel._update_status()
 
@@ -3885,7 +3995,7 @@ def get_active_browser_panel() -> Optional[DiffBrowserPanel]:
     return None
 
 
-def open_browser_diff(diffs: List[NoteDiff], on_commit) -> None:
+def open_browser_diff(diffs: List[NoteDiff], on_commit, is_collab: bool = False) -> None:
     """
     Ouvre l'explorateur Anki filtré sur les notes modifiées et attache
     le DiffBrowserPanel. C'est le point d'entrée principal du workflow diff.
@@ -3893,7 +4003,7 @@ def open_browser_diff(diffs: List[NoteDiff], on_commit) -> None:
     Les notes INSERT sont pré-insérées temporairement dans la collection pour
     être visibles dans le browser. Elles sont supprimées si l'utilisateur annule.
     """
-    global _browser_panel, _pending_diffs, _on_commit_cb
+    global _browser_panel, _pending_diffs, _on_commit_cb, _is_collab_session
 
     if not diffs:
         return
@@ -3974,7 +4084,7 @@ def open_browser_diff(diffs: List[NoteDiff], on_commit) -> None:
         _browser_panel = None
 
     # 3. Enregistrer les nouveaux diffs et pré-insérer les notes INSERT
-    set_pending_diffs(diffs, on_commit)
+    set_pending_diffs(diffs, on_commit, is_collab=is_collab)
     _stage_insert_notes(diffs)
 
     # Construire le filtre : utiliser les staged_note_id pour les INSERT, note_id pour le reste
@@ -3992,7 +4102,7 @@ def open_browser_diff(diffs: List[NoteDiff], on_commit) -> None:
     browser = aqt.dialogs.open("Browser", aqt.mw)
     browser.search_for(search_str)
 
-    _browser_panel = DiffBrowserPanel(browser)
+    _browser_panel = DiffBrowserPanel(browser, is_collab=is_collab)
 
     editor = getattr(browser, "editor", None)
     if editor:
@@ -4102,8 +4212,53 @@ def open_browser_diff(diffs: List[NoteDiff], on_commit) -> None:
     browser.raise_()
 
 _decision_hook = None  # Hook de test
+_commit_confirmation_hook = None  # Hook de test : callable retournant bool (confirmed) ou tuple[bool, bool] (confirmed, accept_all_tags)
 _is_prompting_decision = False
 _last_prompt_decision_time = 0.0
+
+
+def apply_all_pending_import_tags() -> None:
+    """
+    Applique les tags proposes par l'importation a l'ensemble des notes de _pending_diffs,
+    quel que soit l'etat d'acceptation ou de refus des chunks (hunks) ou des champs.
+    """
+    global _pending_diffs, _browser_panel
+    for nid, diff in _pending_diffs.items():
+        if getattr(diff, "action", "") == "UPDATE":
+            diff.tags = list(diff.updated_tags)
+            diff.tags_active_target = "PROP"
+            if diff.excluded:
+                diff.excluded = False
+                for fn in diff.field_names:
+                    diff.merged_fields[fn] = diff.original_fields.get(fn, "")
+                if _browser_panel and nid in _browser_panel._note_panels:
+                    panel = _browser_panel._note_panels[nid]
+                    if hasattr(panel, "_include_cb"):
+                        panel._include_cb.setChecked(True)
+                    for fp in panel.get_field_panels().values():
+                        fp.active_target = "OLD"
+                        for h in fp.hunks:
+                            h.accepted = False
+                        for hw in getattr(fp, "_hunk_widgets", []):
+                            hw.hunk.accepted = False
+        elif getattr(diff, "action", "") == "INSERT" and not diff.excluded:
+            diff.tags = list(diff.updated_tags)
+            diff.tags_active_target = "PROP"
+
+        if _browser_panel and nid in _browser_panel._note_panels:
+            panel = _browser_panel._note_panels[nid]
+            if hasattr(panel, "_tags_panel") and panel._tags_panel:
+                panel._tags_panel.refresh()
+
+    if _browser_panel:
+        editor = getattr(_browser_panel._browser, "editor", None)
+        note = _get_editor_note(editor)
+        if editor and note and note.id in _pending_diffs:
+            try:
+                sync_tags_to_editor(editor, _pending_diffs[note.id].tags)
+            except Exception:
+                pass
+        _browser_panel._update_status()
 
 
 def prompt_diff_close_decision(parent=None) -> str:
@@ -4129,7 +4284,7 @@ def prompt_diff_close_decision(parent=None) -> str:
         dialog = QtWidgets.QDialog(parent)
         dialog.setWindowTitle("Fermeture de la revue des differences")
         dialog.setModal(True)
-        dialog.resize(420, 160)
+        dialog.resize(420, 195)
         try:
             from .ui import _get_style_base
             dialog.setStyleSheet(_get_style_base())
@@ -4151,6 +4306,25 @@ def prompt_diff_close_decision(parent=None) -> str:
         info_lbl.setWordWrap(True)
         info_lbl.setStyleSheet(f"font-size: 12px; color: {_CLR_TEXT};")
         layout.addWidget(info_lbl)
+
+        cfg_default_tags = True
+        try:
+            cfg = aqt.mw.addonManager.getConfig("anki_import_diff") or {}
+            cfg_default_tags = cfg.get("accept_all_tags_on_confirm", True)
+        except Exception:
+            pass
+
+        cb_tags = QtWidgets.QCheckBox(
+            "Accepter toutes les modifications de tags sans égard au contenu",
+            dialog
+        )
+        cb_tags.setChecked(bool(cfg_default_tags))
+        cb_tags.setToolTip(
+            "Si cette case est cochée, les tags proposés par l'importation seront appliqués à toutes les notes,\n"
+            "même si certains fragments de texte (chunks) ou modifications de champs ont été refusés."
+        )
+        cb_tags.setStyleSheet(f"color: {_CLR_TEXT}; font-size: 12px; margin-top: 4px; margin-bottom: 4px;")
+        layout.addWidget(cb_tags)
 
         btn_layout = QtWidgets.QVBoxLayout()
         btn_layout.setSpacing(8)
@@ -4188,6 +4362,8 @@ def prompt_diff_close_decision(parent=None) -> str:
 
         def on_keep():
             decision[0] = "commit"
+            if cb_tags.isChecked():
+                apply_all_pending_import_tags()
             dialog.accept()
 
         def on_revert():

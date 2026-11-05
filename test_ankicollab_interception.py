@@ -456,3 +456,115 @@ def test_context_menu_tooltip_set_during_diff():
 
     assert "en cours de révision" in act_collab.toolTip()
 
+
+def test_ankicollab_insert_diff_enriches_deck_and_suspend_setting():
+    """Vérifie que hooked_install_deck_op enrichit les notes INSERT avec le deck cible et suspend_new_cards."""
+    mock_im = _create_mock_collab_import_manager()
+    sys.modules["1957538407.import_manager"] = mock_im
+    ack.setup_ankicollab_hook()
+
+    insert_diff = NoteDiff(
+        note_id=200,
+        original_fields={},
+        updated_fields={"Recto": "Nouvelle carte"},
+        model_name="Basique",
+        field_names=["Recto"],
+        action="INSERT",
+        deck_name="",
+        suspend_cards=False,
+    )
+
+    deck_mock = MagicMock()
+    deck_mock.anki_dict = {"name": "EDN"}
+    config_mock = MagicMock()
+    config_mock.deck_hash = "deck_edn_hash"
+    config_mock.home_deck = "EDN::Cardiologie"
+    config_mock.new_notes_home_deck = ""
+    config_mock.suspend_new_cards = True
+
+    with patch("anki_import_diff.src.ankicollab_hook.is_ankicollab_diff_enabled", return_value=True), \
+         patch("anki_import_diff.src.ankicollab_hook.capture_import_changes", return_value=[insert_diff]):
+
+        res = mock_im._install_deck_op(deck_mock, config_mock)
+        assert res.get("_is_diff_run") is True
+        diff = res.get("diffs")[0]
+        assert diff.deck_name == "EDN::Cardiologie"
+        assert diff.suspend_cards is True
+
+
+def test_stage_insert_notes_applies_deck_and_auto_suspends():
+    """Vérifie que _stage_insert_notes place la note dans le deck cible et suspend ses cartes si suspend_cards=True."""
+    mock_col = MagicMock()
+    mock_decks = MagicMock()
+    mock_sched = MagicMock()
+    mock_col.decks = mock_decks
+    mock_col.sched = mock_sched
+    mock_decks.id.return_value = 12345
+
+    fake_note = MagicMock()
+    fake_note.id = 9999
+    fake_note.fields = [""]
+    fake_note.card_ids.return_value = [10001, 10002]
+    mock_col.new_note.return_value = fake_note
+    mock_col.models.by_name.return_value = {"id": 1, "name": "Basique", "flds": [{"name": "Recto"}]}
+
+    insert_diff = NoteDiff(
+        note_id=500,
+        original_fields={},
+        updated_fields={"Recto": "Nouveau contenu"},
+        model_name="Basique",
+        field_names=["Recto"],
+        action="INSERT",
+        deck_name="EDN::Neurologie",
+        suspend_cards=True,
+    )
+
+    with patch("aqt.mw") as mock_mw:
+        mock_mw.col = mock_col
+        staged_nids = bi._stage_insert_notes([insert_diff])
+
+        assert staged_nids == [9999]
+        mock_decks.id.assert_called_with("EDN::Neurologie")
+        mock_col.add_note.assert_called_with(fake_note, 12345)
+        mock_sched.suspend_cards.assert_called_with([10001, 10002])
+
+
+def test_commit_changes_preserves_target_deck_and_auto_suspends():
+    """Vérifie que commit_changes pour une note INSERT sans staging utilise le deck cible et suspend les cartes."""
+    from anki_import_diff.src.hooks import commit_changes
+
+    mock_col = MagicMock()
+    mock_decks = MagicMock()
+    mock_sched = MagicMock()
+    mock_col.decks = mock_decks
+    mock_col.sched = mock_sched
+    mock_decks.id.return_value = 77777
+
+    fake_note = MagicMock()
+    fake_note.id = 8888
+    fake_note.fields = [""]
+    fake_note.card_ids.return_value = [20001]
+    mock_col.new_note.return_value = fake_note
+    mock_col.models.by_name.return_value = {"id": 1, "name": "Basique", "flds": [{"name": "Texte"}]}
+
+    insert_diff = NoteDiff(
+        note_id=600,
+        original_fields={},
+        updated_fields={"Texte": "Contenu final"},
+        model_name="Basique",
+        field_names=["Texte"],
+        action="INSERT",
+        deck_name="EDN::Pneumologie",
+        suspend_cards=True,
+    )
+
+    with patch("aqt.mw") as mock_mw, \
+         patch("anki_import_diff.src.hooks.flush_pending_history_snapshots"):
+        mock_mw.col = mock_col
+        commit_changes([insert_diff])
+
+        mock_decks.id.assert_called_with("EDN::Pneumologie")
+        mock_col.add_note.assert_called_with(fake_note, 77777)
+        mock_sched.suspend_cards.assert_called_with([20001])
+
+

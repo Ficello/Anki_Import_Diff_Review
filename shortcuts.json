@@ -1,0 +1,42 @@
+{
+  "$schema": "https://raw.githubusercontent.com/Ficello/Anki-Customize-Keyboard-Shortcuts/main/schemas/shortcuts-v1.json",
+  "schema_version": 1,
+  "addon_name": "Anki Import Diff Review",
+  "shortcuts": [
+    {
+      "id": "import_diff.accept_all",
+      "label": "Diff: Accepter toutes les modifications de la note",
+      "scope": "browser",
+      "default": "F2",
+      "fallbacks": ["Alt+A", "Alt+V", "Ctrl+Alt+A", "Alt+Y", "Ctrl+Shift+A"]
+    },
+    {
+      "id": "import_diff.reject_all",
+      "label": "Diff: Rejeter toutes les modifications de la note",
+      "scope": "browser",
+      "default": "F3",
+      "fallbacks": ["Alt+R", "Ctrl+Alt+R", "Alt+N", "Ctrl+Shift+R"]
+    },
+    {
+      "id": "import_diff.accept_tags",
+      "label": "Diff: Accepter uniquement les modifications de tags",
+      "scope": "browser",
+      "default": "F4",
+      "fallbacks": ["Alt+Shift+T", "Ctrl+Alt+Shift+T"]
+    },
+    {
+      "id": "import_diff.toggle_history",
+      "label": "Diff: Basculer vers l'onglet historique",
+      "scope": "browser",
+      "default": "Alt+H",
+      "fallbacks": ["Ctrl+Shift+H"]
+    },
+    {
+      "id": "import_diff.copy_old",
+      "label": "Diff: Copier les anciens champs de la note",
+      "scope": "browser",
+      "default": "Alt+C",
+      "fallbacks": ["Ctrl+Shift+C"]
+    }
+  ]
+}

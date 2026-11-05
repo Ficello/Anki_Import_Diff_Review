@@ -80,6 +80,27 @@ def confirm_import_or_abort_suggestion(parent_widget=None) -> bool:
     btn_cancel = msg_box.addButton("Annuler", QMessageBox.ButtonRole.RejectRole)
     msg_box.setDefaultButton(btn_confirm)
 
+    try:
+        from PyQt6.QtWidgets import QCheckBox
+    except ImportError:
+        try:
+            from PySide6.QtWidgets import QCheckBox
+        except ImportError:
+            QCheckBox = None
+
+    cb_tags = None
+    if QCheckBox is not None:
+        try:
+            cb_tags = QCheckBox("Accepter toutes les modifications de tags sans égard au contenu", msg_box)
+            cb_tags.setChecked(True)
+            cb_tags.setToolTip(
+                "Si cette case est cochée, les tags proposés par l'importation seront appliqués à toutes les notes,\n"
+                "même si certains fragments de texte (chunks) ou modifications de champs ont été refusés."
+            )
+            msg_box.setCheckBox(cb_tags)
+        except Exception:
+            cb_tags = None
+
     msg_box.exec()
     clicked = msg_box.clickedButton()
 
@@ -87,6 +108,15 @@ def confirm_import_or_abort_suggestion(parent_widget=None) -> bool:
 
     if clicked == btn_confirm:
         if panel:
+            if cb_tags is not None and getattr(cb_tags, "isChecked", lambda: False)():
+                if hasattr(panel, "_apply_all_import_tags"):
+                    panel._apply_all_import_tags()
+                else:
+                    try:
+                        from .browser_integration import apply_all_pending_import_tags
+                        apply_all_pending_import_tags()
+                    except Exception:
+                        pass
             panel.apply_commit()
         return True
     elif clicked == btn_review:
@@ -336,6 +366,22 @@ def setup_ankicollab_hook() -> bool:
             # Réexécuter sans savepoint pour persister les métadonnées de deck
             return orig_install_deck_op(deck, config, map_cache, note_type_data)
 
+        # Diffs détectés : enrichir avec la configuration AnkiCollab (deck cible et suspend_new_cards)
+        collab_target_deck = ""
+        if config:
+            collab_target_deck = getattr(config, "new_notes_home_deck", "") or getattr(config, "home_deck", "")
+        if not collab_target_deck and hasattr(deck, "anki_dict") and isinstance(deck.anki_dict, dict):
+            collab_target_deck = deck.anki_dict.get("name", "")
+
+        collab_suspend_new_cards = bool(getattr(config, "suspend_new_cards", False))
+
+        for d in diffs:
+            if d.action == "INSERT":
+                if not getattr(d, "deck_name", "") and collab_target_deck:
+                    d.deck_name = collab_target_deck
+                if collab_suspend_new_cards:
+                    d.suspend_cards = True
+
         # Diffs détectés : renvoyer le paquet de diff au handler de succès
         return {
             "_is_diff_run": True,
@@ -377,7 +423,7 @@ def setup_ankicollab_hook() -> bool:
                 except Exception as ex:
                     print(f"[anki-diff] Erreur finalisation AnkiCollab: {ex}")
 
-            open_browser_diff(diffs, _on_collab_commit)
+            open_browser_diff(diffs, _on_collab_commit, is_collab=True)
             return
 
         return orig_on_deck_installed(install_result, deck, subscription, input_hash, update_timestamp_after)
@@ -465,14 +511,17 @@ def setup_tools_menu() -> None:
     act_learned = QAction("Filtrer sur les cartes déjà apprises par défaut", diff_menu)
     act_learned.setObjectName("VisualDiff_Toggle_Learned_Only")
     act_learned.setCheckable(True)
-    act_learned.setChecked(cfg.get("learned_cards_only", False))
+    act_learned.setChecked(cfg.get("learned_cards_only", True))
 
     def on_toggle_learned(checked: bool):
         try:
             c = mw.addonManager.getConfig("anki_import_diff") or {}
             c["learned_cards_only"] = checked
+            from .browser_integration import _BROWSER_STATE_KEY
+            if _BROWSER_STATE_KEY in c and isinstance(c[_BROWSER_STATE_KEY], dict):
+                c[_BROWSER_STATE_KEY]["learned_cards_only"] = checked
             mw.addonManager.writeConfig("anki_import_diff", c)
-            msg = "Filtre cartes apprises activé par défaut." if checked else "Filtre cartes apprises désactivé par défaut."
+            msg = "Filtre cartes apprises activé par défaut (AnkiCollab)." if checked else "Filtre cartes apprises désactivé par défaut."
             if tooltip:
                 tooltip(msg, period=2000)
         except Exception as e:
@@ -482,7 +531,7 @@ def setup_tools_menu() -> None:
         try:
             act.setChecked(is_visual_diff_enabled())
             c = mw.addonManager.getConfig("anki_import_diff") or {} if hasattr(mw, "addonManager") else {}
-            act_learned.setChecked(c.get("learned_cards_only", False))
+            act_learned.setChecked(c.get("learned_cards_only", True))
         except Exception:
             pass
 

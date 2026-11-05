@@ -42,13 +42,19 @@ _CONTEXT_CHARS = 60  # characters of context to show around each hunk
 
 
 def normalize_html_tags(text: str) -> str:
-    """Normalise les guillemets et espaces mineurs dans les balises pour éviter les faux diffs."""
+    """Normalise les guillemets, balises auto-fermantes et espaces mineurs dans les balises pour éviter les faux diffs."""
     if not text:
         return ""
     def norm_tag(m):
         tag = m.group(0)
+        # Standardiser les balises auto-fermantes courantes : <br />, <br/> -> <br>, <hr />, <hr/> -> <hr>
+        tag = re.sub(r"^<([a-zA-Z0-9]+)\s*/>$", r"<\1>", tag)
+        tag = re.sub(r"^<([a-zA-Z0-9]+)\s+([^>]*?)\s*/>$", r"<\1 \2>", tag)
         # Standardiser les guillemets simples en doubles pour les attributs
-        return re.sub(r"=\s*'([^']*)'", r'="\1"', tag)
+        tag = re.sub(r"=\s*'([^']*)'", r'="\1"', tag)
+        # Normaliser les espaces internes avant la fermeture >
+        tag = re.sub(r"\s+>$", ">", tag)
+        return tag
     return re.sub(r"<[^>]+>", norm_tag, text)
 
 

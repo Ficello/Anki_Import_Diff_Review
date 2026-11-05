@@ -33,7 +33,7 @@ except ImportError:
 
 from .savepoint import NoteDiff
 from .diff import DiffHunk, compute_hunks, apply_hunks, highlight_diff
-from .theme import chrome_colors, blend_colors, PaletteMixin, _StatusDot, ThemeColor
+from .theme import chrome_colors, blend_colors, PaletteMixin, _StatusDot, ThemeColor, is_dark, is_dark_mode
 
 # ---------------------------------------------------------------------------
 # AnkiWebView integration — fallback si Anki n'est pas actif (tests)
@@ -308,6 +308,14 @@ QDialog, QWidget {{
     color: {c['text_primary']};
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
     font-size: 13px;
+}}
+QToolTip, CustomLabel, QLabel[customTooltip="true"] {{
+    background-color: {('#0f172a' if is_dark() else '#feffc4')};
+    color: {('#f8fafc' if is_dark() else '#000000')};
+    border: 1px solid {('#334155' if is_dark() else '#cbd5e1')};
+    border-radius: 6px;
+    padding: 8px 12px;
+    font-size: 12px;
 }}
 QSplitter::handle {{
     background: {c['border']};

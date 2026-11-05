@@ -37,6 +37,7 @@ Par defaut, lorsqu'on importe un fichier `.apkg` ou `.csv`, ou qu'on met a jour 
 
 - **Controle par champ :** Conservez par exemple la mise a jour de la question officielle mais refusez l'ecrasement de votre champ de notes personnelles.
 - **Edition manuelle :** Possibilite de modifier le texte directement dans l'interface avant de l'enregistrer.
+- **Gestion globale des tags :** Lors de la confirmation finale, une option pré-cochée permet d'adopter immédiatement tous les tags de l'importation sans égard aux fragments de texte (chunks) acceptés ou refusés.
 - **Volet lateral dans le navigateur (Parcourir) :** Suivi de l'historique de chaque carte et filtres rapides (*Champs modifies uniquement*, *Cartes deja apprises*).
 
 ---

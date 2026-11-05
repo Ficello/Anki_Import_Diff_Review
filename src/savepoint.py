@@ -168,6 +168,8 @@ class NoteDiff:
     excluded: bool = False
     model_id: int = 0          # model ID (mid) — lookup fiable sans dépendre du nom
     deck_id: int = 0           # deck cible pour les notes INSERT (capturé pendant le savepoint)
+    deck_name: str = ""        # nom hiérarchique du deck cible pour les notes INSERT
+    suspend_cards: bool = False # True si les cartes créées doivent être suspendues (ex: réglage AnkiCollab auto suspend)
     staged_note_id: int = 0    # ID réel après pré-insertion temporaire dans le browser
     guid: str = ""             # GUID Anki d'origine (préservé pour AnkiCollab et imports ultérieurs)
 
@@ -330,20 +332,30 @@ def capture_import_changes(import_fn: Callable[..., Any], *args: Any, **kwargs: 
                     except (KeyError, IndexError, TypeError):
                         return None
 
-                # Group by note_id to preserve the initial old values and latest new values
+                # Group by guid if available, otherwise by note_id
+                # This consolidates cases where AnkiCollab restores the original note ID via:
+                # UPDATE notes SET id = note._original_id (triggering UPDATE with the same GUID).
                 grouped_rows = {}
                 for row in rows:
                     nid = _row_get(row, 0, "note_id")
-                    if nid not in grouped_rows:
-                        grouped_rows[nid] = []
-                    grouped_rows[nid].append(row)
+                    guid = _row_get(row, 8, "guid")
+                    group_key = guid if (guid and isinstance(guid, str) and guid.strip()) else f"nid_{nid}"
+                    if group_key not in grouped_rows:
+                        grouped_rows[group_key] = []
+                    grouped_rows[group_key].append(row)
 
                 diffs = []
-                for nid, row_list in grouped_rows.items():
+                for group_key, row_list in grouped_rows.items():
                     first_row = row_list[0]
                     last_row = row_list[-1]
 
-                    action   = _row_get(last_row, 1, "action")
+                    # If the first operation in this group was an INSERT, the overall action is INSERT
+                    # (even if AnkiCollab subsequently ran an UPDATE to restore note._original_id).
+                    first_action = _row_get(first_row, 1, "action")
+                    last_action = _row_get(last_row, 1, "action")
+                    action = "INSERT" if first_action == "INSERT" else last_action
+
+                    final_nid = _row_get(last_row, 0, "note_id")
                     old_flds_str = _row_get(first_row, 2, "old_flds")
                     new_flds_str = _row_get(last_row, 3, "new_flds")
                     mid      = _row_get(last_row, 4, "model_id")
@@ -409,21 +421,58 @@ def capture_import_changes(import_fn: Callable[..., Any], *args: Any, **kwargs: 
                         original_fields[name] = old_split[i]
                         updated_fields[name] = new_split[i]
                         
-                    # Pour les notes INSERT : capturer le deck_id depuis la table cards
-                    # (les cartes existent dans la DB à ce stade, avant le rollback du savepoint)
+                    # Pour les notes INSERT : capturer le deck_id, deck_name et état de suspension
+                    # depuis la table cards (les cartes existent dans la DB à ce stade, avant le rollback)
                     diff_deck_id = 0
+                    diff_deck_name = ""
+                    diff_suspend = False
+
                     if action == 'INSERT':
                         try:
-                            deck_rows = db.all("SELECT CASE WHEN odid > 0 THEN odid ELSE did END as did FROM cards WHERE nid = ? LIMIT 1", nid)
-                            if deck_rows:
-                                did_val = _row_get(deck_rows[0], 0, "did")
+                            card_info = []
+                            # 1. Chercher d'abord dans cards par final_nid
+                            if final_nid:
+                                card_info = db.all(
+                                    "SELECT CASE WHEN odid > 0 THEN odid ELSE did END as did, queue FROM cards WHERE nid = ?",
+                                    final_nid
+                                )
+                            # 2. Si rien trouvé (ex: renommage de nid par AnkiCollab _restore_original_note_ids), chercher par guid via notes
+                            if not card_info and guid_str:
+                                card_info = db.all(
+                                    "SELECT CASE WHEN c.odid > 0 THEN c.odid ELSE c.did END as did, c.queue, n.id "
+                                    "FROM cards c JOIN notes n ON c.nid = n.id WHERE n.guid = ?",
+                                    guid_str
+                                )
+                                if card_info:
+                                    actual_id = _row_get(card_info[0], 2, "id")
+                                    if actual_id:
+                                        final_nid = int(actual_id)
+                            # 3. Fallback sur le note_id initial de la première ligne si différent
+                            first_nid = _row_get(first_row, 0, "note_id")
+                            if not card_info and first_nid and first_nid != final_nid:
+                                card_info = db.all(
+                                    "SELECT CASE WHEN odid > 0 THEN odid ELSE did END as did, queue FROM cards WHERE nid = ?",
+                                    first_nid
+                                )
+
+                            if card_info:
+                                did_val = _row_get(card_info[0], 0, "did")
                                 if did_val is not None:
                                     diff_deck_id = int(did_val)
-                        except Exception:
-                            pass
+                                    col_obj = getattr(aqt.mw, "col", None) if getattr(aqt, "mw", None) else None
+                                    if col_obj and hasattr(col_obj, "decks"):
+                                        try:
+                                            diff_deck_name = col_obj.decks.name(diff_deck_id)
+                                        except Exception:
+                                            pass
+
+                                # Si toutes les cartes créées sont en file suspendue (queue == -1)
+                                diff_suspend = all(_row_get(r, 1, "queue") == -1 for r in card_info)
+                        except Exception as e_deck:
+                            print(f"[anki-diff] Error capturing deck/suspension for INSERT note {final_nid}: {e_deck}")
 
                     diffs.append(NoteDiff(
-                        note_id=nid,
+                        note_id=final_nid,
                         original_fields=original_fields,
                         updated_fields=updated_fields,
                         model_name=model_name,
@@ -434,6 +483,8 @@ def capture_import_changes(import_fn: Callable[..., Any], *args: Any, **kwargs: 
                         updated_tags=upd_tags,
                         model_id=mid or 0,
                         deck_id=diff_deck_id,
+                        deck_name=diff_deck_name,
+                        suspend_cards=diff_suspend,
                         guid=guid_str or "",
                     ))
                     

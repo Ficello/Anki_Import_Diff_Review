@@ -54,6 +54,36 @@ def blend_colors(base: _QColor, overlay: _QColor, alpha: float) -> _QColor:
     return out
 
 
+def is_dark(widget: Optional[_QWidget] = None) -> bool:
+    """Retourne True si l'application ou le widget est en mode sombre."""
+    try:
+        from aqt.theme import theme_manager
+        if theme_manager and hasattr(theme_manager, "night_mode"):
+            return bool(theme_manager.night_mode)
+    except Exception:
+        pass
+    try:
+        from aqt import mw
+        if mw and hasattr(mw, "pm") and hasattr(mw.pm, "night_mode"):
+            return bool(mw.pm.night_mode())
+    except Exception:
+        pass
+    app = _QApplication.instance()
+    if widget is not None:
+        pal = widget.palette()
+    elif app is not None:
+        pal = app.palette()
+    else:
+        pal = _QPalette()
+    base = pal.color(_QPalette.ColorRole.Base)
+    return base.lightness() < 128
+
+
+def is_dark_mode(widget: Optional[_QWidget] = None) -> bool:
+    """Alias pour is_dark."""
+    return is_dark(widget)
+
+
 def chrome_colors(widget: Optional[_QWidget] = None) -> dict[str, str]:
     """
     Calcule et retourne un dictionnaire complet de couleurs dérivées de la palette.
@@ -76,12 +106,12 @@ def chrome_colors(widget: Optional[_QWidget] = None) -> dict[str, str]:
     window = concrete(_QPalette.ColorRole.Window)
     button = concrete(_QPalette.ColorRole.Button)
     
-    is_dark = base.lightness() < 128
+    dark = is_dark(widget)
 
     # Couleurs sémantiques adaptées au contraste
-    ok = "#34D399" if is_dark else "#059669"
-    warn = "#F59E0B" if is_dark else "#D97706"
-    err = "#F87171" if is_dark else "#DC2626"
+    ok = "#34D399" if dark else "#059669"
+    warn = "#F59E0B" if dark else "#D97706"
+    err = "#F87171" if dark else "#DC2626"
 
     # Surfaces dérivées
     surface = blend_colors(window, text, 0.055)
@@ -96,18 +126,18 @@ def chrome_colors(widget: Optional[_QWidget] = None) -> dict[str, str]:
     accent_hover = blend_colors(accent, accent_text, 0.12)
 
     # Couleurs de diff (Ajout / Suppression / Warning)
-    add_color = _QColor("#10B981" if is_dark else "#059669")
-    rem_color = _QColor("#EF4444" if is_dark else "#DC2626")
+    add_color = _QColor("#10B981" if dark else "#059669")
+    rem_color = _QColor("#EF4444" if dark else "#DC2626")
     warn_color = _QColor(warn)
 
-    add_bg = blend_colors(base, add_color, 0.18 if is_dark else 0.12)
-    add_border = blend_colors(base, add_color, 0.45 if is_dark else 0.35)
+    add_bg = blend_colors(base, add_color, 0.18 if dark else 0.12)
+    add_border = blend_colors(base, add_color, 0.45 if dark else 0.35)
     
-    rem_bg = blend_colors(base, rem_color, 0.18 if is_dark else 0.10)
-    rem_border = blend_colors(base, rem_color, 0.45 if is_dark else 0.35)
+    rem_bg = blend_colors(base, rem_color, 0.18 if dark else 0.10)
+    rem_border = blend_colors(base, rem_color, 0.45 if dark else 0.35)
 
-    warn_bg = blend_colors(base, warn_color, 0.18 if is_dark else 0.12)
-    warn_border = blend_colors(base, warn_color, 0.45 if is_dark else 0.35)
+    warn_bg = blend_colors(base, warn_color, 0.18 if dark else 0.12)
+    warn_border = blend_colors(base, warn_color, 0.45 if dark else 0.35)
 
     placeholder = concrete(_QPalette.ColorRole.PlaceholderText)
 
@@ -138,9 +168,9 @@ def chrome_colors(widget: Optional[_QWidget] = None) -> dict[str, str]:
         "primary": _hex(accent),
         "primary_hover": _hex(accent_hover),
         "danger": err,
-        "danger_hover": "#DC2626" if is_dark else "#B91C1C",
+        "danger_hover": "#DC2626" if dark else "#B91C1C",
         "success": ok,
-        "success_hover": "#059669" if is_dark else "#047857",
+        "success_hover": "#059669" if dark else "#047857",
         "neutral_bg": _hex(surface_high),
         "neutral_bg_hover": _hex(surface_hover),
         "neutral_text": _hex(text),

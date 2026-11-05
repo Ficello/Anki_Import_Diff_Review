@@ -785,7 +785,39 @@ def commit_changes(accepted_diffs: List[NoteDiff]) -> None:
                             note.fields[idx] = sanitize_surrogates(merged_val)
                             changed = True
                 note.tags = [sanitize_surrogates(t) for t in diff.tags]
+
+                # Suivre l'état de suspension des cartes sœurs avant la mise à jour
+                cards_before = []
+                try:
+                    cards_before = col.db.all("SELECT id, queue FROM cards WHERE nid = ?", note.id)
+                except Exception:
+                    pass
+                all_siblings_suspended = bool(cards_before) and all(
+                    (_row_val[1] if isinstance(_row_val, (list, tuple)) else _row_val.get("queue")) == -1
+                    for _row_val in cards_before
+                )
+                existing_card_ids = {
+                    (_row_val[0] if isinstance(_row_val, (list, tuple)) else _row_val.get("id"))
+                    for _row_val in cards_before
+                }
+
                 col.update_note(note)
+
+                # Si toutes les cartes sœurs étaient suspendues, suspendre les nouvelles cartes générées (ex: nouveau cloze)
+                if all_siblings_suspended and hasattr(col, "sched"):
+                    try:
+                        cards_after = col.db.all("SELECT id FROM cards WHERE nid = ?", note.id)
+                        new_card_ids = [
+                            (_row_val[0] if isinstance(_row_val, (list, tuple)) else _row_val.get("id"))
+                            for _row_val in cards_after
+                            if (_row_val[0] if isinstance(_row_val, (list, tuple)) else _row_val.get("id")) not in existing_card_ids
+                        ]
+                        if new_card_ids:
+                            col.sched.suspend_cards(new_card_ids)
+                            print(f"[anki-diff] Sibling suspension: suspended {len(new_card_ids)} new card(s) for note {note.id}")
+                    except Exception as e_susp:
+                        print(f"[anki-diff] Error suspending new sibling cards: {e_susp}")
+
                 updated_count += 1
                 print(f"[anki-diff] commit UPDATE OK: note {diff.note_id} (changed={changed})")
 
@@ -809,6 +841,32 @@ def commit_changes(accepted_diffs: List[NoteDiff]) -> None:
                             tags_to_apply = diff.tags if diff.tags else diff.updated_tags
                             note.tags = [sanitize_surrogates(t) for t in tags_to_apply]
                             col.update_note(note)
+
+                        # S'assurer que le deck cible est le bon
+                        target_did = None
+                        if getattr(diff, "deck_name", "") and hasattr(col, "decks"):
+                            try:
+                                target_did = col.decks.id(diff.deck_name)
+                            except Exception:
+                                pass
+                        elif getattr(diff, "deck_id", 0) and hasattr(col, "decks") and col.decks.get(diff.deck_id, default=False):
+                            target_did = diff.deck_id
+                        elif getattr(diff, "deck_id", 0):
+                            target_did = diff.deck_id
+
+                        if target_did is not None and hasattr(col, "set_deck"):
+                            try:
+                                col.set_deck(note.card_ids(), target_did)
+                            except Exception:
+                                pass
+
+                        # S'assurer que les cartes restent suspendues si suspend_cards est True
+                        if getattr(diff, "suspend_cards", False) and hasattr(col, "sched"):
+                            try:
+                                col.sched.suspend_cards(note.card_ids())
+                            except Exception:
+                                pass
+
                         inserted_count += 1
                         print(f"[anki-diff] commit INSERT (staged) OK: staged_id={diff.staged_note_id}")
                     except Exception as e:
@@ -854,10 +912,27 @@ def commit_changes(accepted_diffs: List[NoteDiff]) -> None:
                             note.fields[idx] = val
                     note.tags = tags
 
-                    deck_id = diff.deck_id or 1
+                    deck_id = 1
+                    if getattr(diff, "deck_name", "") and hasattr(col, "decks"):
+                        try:
+                            deck_id = col.decks.id(diff.deck_name)
+                        except Exception:
+                            pass
+                    elif getattr(diff, "deck_id", 0) and hasattr(col, "decks") and col.decks.get(diff.deck_id, default=False):
+                        deck_id = diff.deck_id
+                    elif getattr(diff, "deck_id", 0):
+                        deck_id = diff.deck_id
+
                     col.add_note(note, deck_id)
+
+                    if getattr(diff, "suspend_cards", False) and hasattr(col, "sched"):
+                        try:
+                            col.sched.suspend_cards(note.card_ids())
+                        except Exception:
+                            pass
+
                     inserted_count += 1
-                    print(f"[anki-diff] commit INSERT OK: note {diff.note_id} → new id {note.id} in deck {deck_id}")
+                    print(f"[anki-diff] commit INSERT OK: note {diff.note_id} → new id {note.id} in deck {deck_id} (suspended={getattr(diff, 'suspend_cards', False)})")
 
             elif diff.action == "DELETE":
                 col.remove_notes([diff.note_id])

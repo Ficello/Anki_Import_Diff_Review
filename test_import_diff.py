@@ -201,7 +201,7 @@ class MockCollection:
 
 class MockAddonManager:
     def __init__(self):
-        self.config = {"visual_diff_enabled": True}
+        self.config = {"visual_diff_enabled": True, "learned_cards_only": True}
     def getConfig(self, name):
         return self.config
     def writeConfig(self, name, config):
@@ -958,6 +958,10 @@ def test_browser_row_changed_selection(mock_env):
     from anki_import_diff.src.browser_integration import DiffBrowserPanel, NoteDiff
     
     # Setup pending diffs
+    mock_env.col.db.execute(
+        "INSERT INTO cards (id, nid, did, ord, mod, usn, type, queue, due, ivl, factor, reps, lapses, left, odue, odid, flags, data) "
+        "VALUES (1, 201, 1, 0, 0, 0, 2, 2, 0, 10, 2500, 5, 0, 0, 0, 0, 0, ''), (2, 202, 1, 0, 0, 0, 2, 2, 0, 10, 2500, 5, 0, 0, 0, 0, 0, '')"
+    )
     diffs = [
         NoteDiff(201, {"Field 1": "A"}, {"Field 1": "B"}, "Basic", ["Field 1"], "UPDATE"),
         NoteDiff(202, {"Field 1": "C"}, {"Field 1": "D"}, "Basic", ["Field 1"], "UPDATE"),
@@ -997,6 +1001,7 @@ def test_browser_row_changed_selection(mock_env):
 
     try:
         browser = FakeBrowser()
+        browser.col = getattr(aqt.mw, "col", None)
         panel = DiffBrowserPanel(browser)
         
         # Test 1: get_current_note
@@ -1069,6 +1074,7 @@ def test_note_level_inclusion(mock_env):
 
     try:
         browser = FakeBrowser()
+        browser.col = getattr(aqt.mw, "col", None)
         panel = DiffBrowserPanel(browser)
         note_panel = panel._note_panels[301]
         
@@ -1157,6 +1163,7 @@ def test_custom_edit_preserved_on_hunk_sync_and_get_merged(mock_env):
 
     try:
         browser = FakeBrowser()
+        browser.col = getattr(aqt.mw, "col", None)
         panel = DiffBrowserPanel(browser)
         note_panel = panel._note_panels[401]
 
@@ -1204,6 +1211,7 @@ def test_shortcuts_registered_in_diff_browser_panel(mock_env):
 
     try:
         browser = FakeBrowser()
+        browser.col = getattr(aqt.mw, "col", None)
         panel = DiffBrowserPanel(browser)
         assert len(panel._shortcuts) >= 4
         seqs = [sc.key().toString() for sc in panel._shortcuts]
@@ -1295,6 +1303,7 @@ def test_diff_browser_panel_tabs_and_old_fields(mock_env):
 
     try:
         browser = FakeBrowser()
+        browser.col = getattr(aqt.mw, "col", None)
         panel = DiffBrowserPanel(browser)
 
         # Check tabs (Diff & Historique)
@@ -1424,6 +1433,7 @@ def test_diff_browser_panel_history_tab_stability(mock_env):
 
     try:
         browser = FakeBrowser()
+        browser.col = getattr(aqt.mw, "col", None)
         panel = DiffBrowserPanel(browser)
         panel.select_note(777)
 
@@ -1742,6 +1752,7 @@ def test_editor_shortcuts_hook(qtbot):
 
     try:
         browser = FakeBrowser()
+        browser.col = getattr(aqt.mw, "col", None)
         panel = DiffBrowserPanel(browser)
         bi._browser_panel = panel
 
@@ -2596,8 +2607,8 @@ def test_is_note_learned_and_get_learned_note_ids():
     assert learned_set == {202, 303, 404}
 
 
-def test_learned_cards_filter_native_default_disabled():
-    """Verifie que l'option de filtrage des cartes apprises est nativement desactivee par defaut."""
+def test_learned_cards_filter_native_default_enabled():
+    """Verifie que l'option de filtrage des cartes apprises est nativement activee par defaut."""
     from anki_import_diff.src.browser_integration import DiffBrowserPanel, NoteDiff, set_pending_diffs, clear_pending_diffs
     browser = _create_test_browser()
     diff = NoteDiff(
@@ -2615,8 +2626,8 @@ def test_learned_cards_filter_native_default_disabled():
         panel = DiffBrowserPanel(browser)
         assert hasattr(panel, "_btn_learned_only")
         assert panel._btn_learned_only is not None
-        assert panel._btn_learned_only.isChecked() is False
-        assert panel._learned_cards_only is False
+        assert panel._btn_learned_only.isChecked() is True
+        assert panel._learned_cards_only is True
     finally:
         if panel is not None:
             panel.cleanup()
@@ -2664,11 +2675,8 @@ def test_toggle_learned_cards_filter_in_browser():
         panel = DiffBrowserPanel(browser)
         # Bouton affiche le nombre de cartes apprises parmi les diffs
         assert "Cartes déjà apprises (1)" in panel._btn_learned_only.text()
-        assert panel._learned_cards_only is False
-
-        # Activer le filtre
-        panel._btn_learned_only.setChecked(True)
         assert panel._learned_cards_only is True
+        assert panel._btn_learned_only.isChecked() is True
         assert browser.search_query == "nid:202"
         assert panel._current_nid == 202
         assert "Filtre : cartes apprises" in panel._status_lbl.text()
@@ -2678,6 +2686,13 @@ def test_toggle_learned_cards_filter_in_browser():
         assert panel._learned_cards_only is False
         assert browser.search_query == "nid:101,202"
         assert "Filtre : cartes apprises" not in panel._status_lbl.text()
+
+        # Reactiver le filtre
+        panel._btn_learned_only.setChecked(True)
+        assert panel._learned_cards_only is True
+        assert browser.search_query == "nid:202"
+        assert panel._current_nid == 202
+        assert "Filtre : cartes apprises" in panel._status_lbl.text()
     finally:
         if panel is not None:
             panel.cleanup()
@@ -2758,6 +2773,104 @@ def test_learned_cards_filter_persistence(tmp_path, monkeypatch):
         if panel is not None:
             panel.cleanup()
         clear_pending_diffs()
+
+
+def test_file_import_diff_does_not_apply_learned_cards_filter():
+    """Vérifie que pour un import de fichier (is_collab=False), le filtre cartes apprises est désactivé d'emblée."""
+    from anki_import_diff.src.browser_integration import (
+        DiffBrowserPanel, NoteDiff, set_pending_diffs, clear_pending_diffs, open_browser_diff
+    )
+    import anki_import_diff.src.browser_integration as bi
+
+    db = MockAnkiDB()
+    col = MockCollection(db)
+    # Deux notes : 101 et 102 toutes deux non apprises
+    db.execute(
+        "INSERT INTO cards (id, nid, did, ord, mod, usn, type, queue, due, ivl, factor, reps, lapses, left, odue, odid, flags, data) "
+        "VALUES (1, 101, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, '')"
+    )
+    db.execute(
+        "INSERT INTO cards (id, nid, did, ord, mod, usn, type, queue, due, ivl, factor, reps, lapses, left, odue, odid, flags, data) "
+        "VALUES (2, 102, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, '')"
+    )
+
+    diff1 = NoteDiff(note_id=101, original_fields={"A": "1"}, updated_fields={"A": "2"}, model_name="B", field_names=["A"], action="UPDATE")
+    diff2 = NoteDiff(note_id=102, original_fields={"A": "1"}, updated_fields={"A": "2"}, model_name="B", field_names=["A"], action="UPDATE")
+
+    # 1. Test via set_pending_diffs direct avec is_collab=False
+    set_pending_diffs([diff1, diff2], lambda x: None, is_collab=False)
+    browser = _create_test_browser()
+    browser.col = col
+
+    panel = None
+    try:
+        panel = DiffBrowserPanel(browser)
+        # Pour un import de fichier, le filtre ne doit PAS être coché
+        assert panel._is_collab is False
+        assert panel._learned_cards_only is False
+        assert panel._btn_learned_only.isChecked() is False
+        # Ne doit JAMAIS chercher nid:0
+        assert browser.search_query != "nid:0"
+    finally:
+        if panel is not None:
+            panel.cleanup()
+        clear_pending_diffs()
+
+    # 2. Test via open_browser_diff(..., is_collab=False)
+    browser_mock = _create_test_browser()
+    browser_mock.col = col
+    with patch("aqt.dialogs.open", return_value=browser_mock):
+        open_browser_diff([diff1, diff2], lambda x: None, is_collab=False)
+        active_panel = bi._browser_panel
+        try:
+            assert active_panel is not None
+            assert active_panel._is_collab is False
+            assert active_panel._learned_cards_only is False
+            assert active_panel._btn_learned_only.isChecked() is False
+            assert browser_mock.search_query == "nid:101,102"
+        finally:
+            if active_panel is not None:
+                active_panel.cleanup()
+            clear_pending_diffs()
+
+
+def test_ankicollab_import_diff_applies_learned_cards_filter():
+    """Vérifie que pour un diff AnkiCollab (is_collab=True), le filtre cartes apprises est actif par défaut."""
+    from anki_import_diff.src.browser_integration import (
+        DiffBrowserPanel, NoteDiff, set_pending_diffs, clear_pending_diffs, open_browser_diff
+    )
+    import anki_import_diff.src.browser_integration as bi
+
+    db = MockAnkiDB()
+    col = MockCollection(db)
+    # 101 non apprise, 202 apprise
+    db.execute(
+        "INSERT INTO cards (id, nid, did, ord, mod, usn, type, queue, due, ivl, factor, reps, lapses, left, odue, odid, flags, data) "
+        "VALUES (1, 101, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, '')"
+    )
+    db.execute(
+        "INSERT INTO cards (id, nid, did, ord, mod, usn, type, queue, due, ivl, factor, reps, lapses, left, odue, odid, flags, data) "
+        "VALUES (2, 202, 1, 0, 0, 0, 2, 2, 0, 10, 2500, 5, 0, 0, 0, 0, 0, '')"
+    )
+
+    diff1 = NoteDiff(note_id=101, original_fields={"A": "1"}, updated_fields={"A": "2"}, model_name="B", field_names=["A"], action="UPDATE")
+    diff2 = NoteDiff(note_id=202, original_fields={"A": "1"}, updated_fields={"A": "2"}, model_name="B", field_names=["A"], action="UPDATE")
+
+    browser_mock = _create_test_browser()
+    browser_mock.col = col
+    with patch("aqt.dialogs.open", return_value=browser_mock):
+        open_browser_diff([diff1, diff2], lambda x: None, is_collab=True)
+        active_panel = bi._browser_panel
+        try:
+            assert active_panel is not None
+            assert active_panel._is_collab is True
+            assert active_panel._learned_cards_only is True
+            assert active_panel._btn_learned_only.isChecked() is True
+            assert browser_mock.search_query == "nid:202"
+        finally:
+            if active_panel is not None:
+                active_panel.cleanup()
+            clear_pending_diffs()
 
 
 def test_visual_diff_dialog_learned_filter(monkeypatch):

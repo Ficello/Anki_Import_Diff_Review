@@ -6,7 +6,7 @@ test_tag_sync_and_editor_shortcuts.py — Tests de régression pour :
 """
 import sys
 import os
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 import pytest
 from PyQt6 import QtCore, QtGui, QtWidgets
 
@@ -1203,7 +1203,7 @@ def test_tags_display_browser_adaptation_with_many_tags(qtbot):
 def test_escape_key_preserves_child_dialogs_such_as_linked_cards(qtbot):
     """Vérifie qu'appuyer sur Échap lorsqu'un dialogue enfant (comme LinkedCardsDialog)
     est actif ne déclenche JAMAIS la pop-up de fermeture du diff ni le panneau diff."""
-    from unittest.mock import MagicMock
+    from unittest.mock import MagicMock, patch
 
     diff = NoteDiff(
         note_id=940,
@@ -1274,7 +1274,7 @@ def test_escape_key_preserves_child_dialogs_such_as_linked_cards(qtbot):
 def test_escape_key_on_browser_triggers_close_panel_once(qtbot):
     """Vérifie qu'Échap sur l'explorateur déclenche _on_request_close_panel exactement une fois,
     sans double déclenchement lors de la séquence ShortcutOverride -> KeyPress."""
-    from unittest.mock import MagicMock
+    from unittest.mock import MagicMock, patch
 
     diff = NoteDiff(
         note_id=941,
@@ -1344,4 +1344,222 @@ def test_prompt_diff_close_decision_anti_reentrancy():
     with patch.dict("os.environ", {"PYTEST_CURRENT_TEST": "", "QT_QPA_PLATFORM": ""}):
         res2 = bi.prompt_diff_close_decision()
         assert res2 == "cancel"
+
+
+def test_f2_accept_focused_field_syncs_editor_without_stale_overwrite(qtbot):
+    """Vérifie que la synchronisation batch vers l'éditeur supporte les stores Svelte modernes
+    et que l'acceptation F2 d'une note avec un champ focalisé met à jour l'éditeur sans
+    faux conflit custom_edit_fields lors de l'unfocus consécutif."""
+    from src.editor_sync import _SET_FIELDS_BATCH_JS, make_field_edit_hook
+
+    # 1. Vérifier la présence des stratégies Svelte NoteEditor et Shadow DOM
+    assert 'require("anki/NoteEditor").instances' in _SET_FIELDS_BATCH_JS
+    assert "f.content.set" in _SET_FIELDS_BATCH_JS
+    assert "shadowRoot" in _SET_FIELDS_BATCH_JS
+    assert "globalThis.focusField" in _SET_FIELDS_BATCH_JS
+
+    # 2. Créer un diff et simuler l'éditeur
+    diff = NoteDiff(
+        note_id=9876,
+        action="UPDATE",
+        model_name="Basic",
+        field_names=["Front", "Back"],
+        original_fields={"Front": "Q_old", "Back": "A_old"},
+        updated_fields={"Front": "Q_new", "Back": "A_new"},
+        tags=["t1"],
+        original_tags=["t1"],
+        updated_tags=["t1", "t2"],
+    )
+    bi.set_pending_diffs([diff], lambda x: None)
+
+    fake_note = MagicMock()
+    fake_note.id = 9876
+    fake_note.fields = ["Q_old", "A_old"]
+
+    editor = MockEditor(fake_note)
+    editor.currentField = 0  # Champ Front focalisé
+
+    class FakeBrowser(QtWidgets.QMainWindow):
+        def __init__(self):
+            super().__init__()
+            self.table = QtWidgets.QTableView(self)
+            self.editor = editor
+
+    browser = FakeBrowser()
+    qtbot.addWidget(browser)
+
+    try:
+        panel = DiffBrowserPanel(browser)
+        bi._browser_panel = panel
+        panel.set_current_editor(editor)
+
+        # Simuler l'appui sur F2 pour accepter la proposition
+        panel._accept_all_current()
+
+        # Le diff doit contenir les propositions acceptées
+        assert diff.merged_fields["Front"] == "Q_new"
+        assert diff.merged_fields["Back"] == "A_new"
+        assert len(diff.custom_edit_fields) == 0
+
+        # L'appel JS batch doit avoir été envoyé au webview
+        assert len(editor.js_calls) > 0
+        assert any("Q_new" in js and "A_new" in js for js in editor.js_calls)
+
+        # Simuler l'unfocus du champ par Anki après la mise à jour (texte proposé transmis)
+        fake_note.fields[0] = "Q_new"
+        hook = make_field_edit_hook(lambda nid: diff if nid == 9876 else None)
+        hook(True, editor, 0)
+
+        # Aucune fausse modification personnalisée ne doit être enregistrée
+        assert "Front" not in diff.custom_edit_fields
+        assert diff.merged_fields["Front"] == "Q_new"
+
+        # Simuler un unfocus avec variation cosmétique HTML (<br> vs <br />)
+        diff.updated_fields["Back"] = "Line1<br>Line2"
+        diff.merged_fields["Back"] = "Line1<br>Line2"
+        fake_note.fields[1] = "Line1<br />Line2"
+        hook(True, editor, 1)
+        assert "Back" not in diff.custom_edit_fields
+
+    finally:
+        bi.clear_pending_diffs()
+        bi._browser_panel = None
+
+
+def test_continue_commit_all_accepts_all_tags_when_chunks_rejected(qtbot):
+    """Vérifie que lors de la confirmation d'import, si la case d'acceptation des tags est cochée,
+    toutes les modifications de tags sont appliquées même si les chunks de contenu ont été refusés."""
+    from src.savepoint import NoteDiff
+
+    diff1 = NoteDiff(
+        note_id=1001,
+        action="UPDATE",
+        model_name="Basic",
+        field_names=["Front", "Back"],
+        original_fields={"Front": "Front_old", "Back": "Back_old"},
+        updated_fields={"Front": "Front_new", "Back": "Back_new"},
+        original_tags=["tag_original"],
+        updated_tags=["tag_original", "tag_nouveau"],
+        tags=["tag_original", "tag_nouveau"],
+    )
+    diff2 = NoteDiff(
+        note_id=1002,
+        action="UPDATE",
+        model_name="Basic",
+        field_names=["Front", "Back"],
+        original_fields={"Front": "Q2_old", "Back": "A2_old"},
+        updated_fields={"Front": "Q2_new", "Back": "A2_new"},
+        original_tags=["tag2_old"],
+        updated_tags=["tag2_old", "tag2_new"],
+        tags=["tag2_old", "tag2_new"],
+    )
+
+    committed_diffs = []
+    bi.set_pending_diffs([diff1, diff2], lambda diffs: committed_diffs.extend(diffs))
+
+    class FakeBrowser(QtWidgets.QMainWindow):
+        def __init__(self):
+            super().__init__()
+            self.table = QtWidgets.QTableView(self)
+            self.editor = None
+
+    browser = FakeBrowser()
+    qtbot.addWidget(browser)
+
+    try:
+        panel = DiffBrowserPanel(browser)
+        bi._browser_panel = panel
+
+        # Rejeter tous les chunks de diff1 (conserver texte ancien)
+        panel._note_panels[1001].reject_all_hunks()
+        assert diff1.tags == ["tag_original"]
+        assert diff1.tags_active_target == "OLD"
+
+        # Exclure diff2
+        diff2.excluded = True
+
+        # Configurer le hook pour simuler la confirmation avec la case tags cochée (True, True)
+        bi._commit_confirmation_hook = lambda: (True, True)
+
+        with patch("src.hooks.commit_changes") as mock_commit_changes:
+            panel._continue_commit_all()
+
+            # Vérifier que commit_changes a été appelé
+            assert mock_commit_changes.called
+            passed_diffs = mock_commit_changes.call_args[0][0]
+            d1 = next(d for d in passed_diffs if d.note_id == 1001)
+            d2 = next(d for d in passed_diffs if d.note_id == 1002)
+
+            # Les tags doivent être ceux de l'import (updated_tags)
+            assert d1.tags == ["tag_original", "tag_nouveau"]
+            assert d1.tags_active_target == "PROP"
+            # Les champs de diff1 doivent être restés sur l'original (chunks rejetés respectés)
+            assert d1.merged_fields["Front"] == "Front_old"
+            assert d1.merged_fields["Back"] == "Back_old"
+
+            # Diff2 (précédemment exclu) doit avoir été ré-inclus avec tags de l'import et champs d'origine
+            assert not d2.excluded
+            assert d2.tags == ["tag2_old", "tag2_new"]
+            assert d2.merged_fields["Front"] == "Q2_old"
+
+    finally:
+        bi._commit_confirmation_hook = None
+        bi.clear_pending_diffs()
+        bi._browser_panel = None
+
+
+def test_continue_commit_all_preserves_rejected_tags_when_checkbox_unchecked(qtbot):
+    """Vérifie que si la case d'acceptation des tags est décochée, les rejets de tags effectués
+    par l'utilisateur sont scrupuleusement conservés."""
+    from src.savepoint import NoteDiff
+
+    diff = NoteDiff(
+        note_id=2001,
+        action="UPDATE",
+        model_name="Basic",
+        field_names=["Front", "Back"],
+        original_fields={"Front": "Front_old", "Back": "Back_old"},
+        updated_fields={"Front": "Front_new", "Back": "Back_new"},
+        original_tags=["tag_original"],
+        updated_tags=["tag_original", "tag_nouveau"],
+        tags=["tag_original", "tag_nouveau"],
+    )
+
+    bi.set_pending_diffs([diff], lambda x: None)
+
+    class FakeBrowser(QtWidgets.QMainWindow):
+        def __init__(self):
+            super().__init__()
+            self.table = QtWidgets.QTableView(self)
+            self.editor = None
+
+    browser = FakeBrowser()
+    qtbot.addWidget(browser)
+
+    try:
+        panel = DiffBrowserPanel(browser)
+        bi._browser_panel = panel
+
+        # Rejeter tous les hunks (et donc les tags de l'import)
+        panel._note_panels[2001].reject_all_hunks()
+        assert diff.tags == ["tag_original"]
+
+        # Simuler confirmation avec case tags DÉCOCHÉE : (True, False)
+        bi._commit_confirmation_hook = lambda: (True, False)
+
+        with patch("src.hooks.commit_changes") as mock_commit_changes:
+            panel._continue_commit_all()
+
+            assert mock_commit_changes.called
+            d = mock_commit_changes.call_args[0][0][0]
+            # Les tags doivent rester les anciens tags rejetés par l'utilisateur
+            assert d.tags == ["tag_original"]
+            assert d.tags_active_target == "OLD"
+
+    finally:
+        bi._commit_confirmation_hook = None
+        bi.clear_pending_diffs()
+        bi._browser_panel = None
+
+
 
