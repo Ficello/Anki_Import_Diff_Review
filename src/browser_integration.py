@@ -4726,26 +4726,38 @@ def _show_reviewer_history() -> None:
 def _on_reviewer_did_show_question(card) -> None:
     """Met à jour dynamiquement les panneaux d'historique ouverts lorsque la carte dans le reviewer change."""
     try:
-        note = card.note()
-        nid = note.id
-        field_names = [f[0] for f in note.items()]
-        current_fields = dict(note.items())
-        current_fields["__tags__"] = " ".join(note.tags)
-        
         from .ankicollab_panel import AnkiCollabHistoryPanel
+        visible_panels = []
         for ref in AnkiCollabHistoryPanel._instances:
             panel = ref()
             if panel is not None and panel.isVisible():
-                panel.update_to_note(nid, field_names, current_fields)
+                visible_panels.append(panel)
 
         global _browser_panel
+        browser_panel_visible = False
         if _browser_panel is not None:
             try:
                 from aqt.qt import sip
                 if not sip.isdeleted(_browser_panel) and _browser_panel.isVisible():
-                    _browser_panel.select_note(nid)
+                    browser_panel_visible = True
             except Exception:
                 pass
+
+        if not visible_panels and not browser_panel_visible:
+            return
+
+        note = card.note()
+        nid = note.id
+        if visible_panels:
+            items = note.items()
+            field_names = [f[0] for f in items]
+            current_fields = dict(items)
+            current_fields["__tags__"] = " ".join(note.tags)
+            for panel in visible_panels:
+                panel.update_to_note(nid, field_names, current_fields)
+
+        if browser_panel_visible:
+            _browser_panel.select_note(nid)
     except Exception:
         pass
 

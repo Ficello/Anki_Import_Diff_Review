@@ -1180,7 +1180,7 @@ def patch_collection_updates() -> None:
         # Garde-fou d'intégrité DB : si la note n'existe plus en base (ex: staged note annulée),
         # ne pas appeler le backend Rust qui lèverait l'erreur 'No such note'
         try:
-            if note and hasattr(note, "id") and note.id:
+            if note and hasattr(note, "id") and note.id and note.id not in _debounce_timers:
                 if not self.db.first("SELECT 1 FROM notes WHERE id = ?", note.id):
                     return
         except Exception:

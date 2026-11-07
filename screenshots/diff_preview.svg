@@ -5,8 +5,8 @@
       .window { fill: #ffffff; stroke: #cbd5e1; stroke-width: 1.5; rx: 8px; }
       .header { fill: #f1f5f9; stroke: #cbd5e1; stroke-width: 1; }
       .title { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 13px; font-weight: 600; fill: #334155; }
-      .badge-test { fill: #fef2f2; stroke: #fca5a5; stroke-width: 1; rx: 4px; }
-      .badge-test-text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 11px; font-weight: 700; fill: #b91c1c; }
+      .badge-mode { fill: #eff6ff; stroke: #bfdbfe; stroke-width: 1; rx: 4px; }
+      .badge-mode-text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 11px; font-weight: 700; fill: #1d4ed8; }
       .section-label { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 12px; font-weight: 700; fill: #475569; }
       .card-box { fill: #ffffff; stroke: #e2e8f0; stroke-width: 1; rx: 6px; }
       .field-label { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 11px; font-weight: 600; fill: #64748b; text-transform: uppercase; letter-spacing: 0.5px; }
@@ -45,91 +45,91 @@
     <circle cx="16" cy="18" r="5" fill="#f87171" />
     <circle cx="32" cy="18" r="5" fill="#fbbf24" />
     <circle cx="48" cy="18" r="5" fill="#4ade80" />
-    <text x="70" y="22" class="title">Revue des differences avant importation - Visual Diff Hunk</text>
+    <text x="70" y="22" class="title">Import Diff Review — Visual Diff Hunk</text>
     
-    <!-- Test Badge in Header -->
-    <rect x="640" y="8" width="105" height="20" class="badge-test" />
-    <text x="648" y="22" class="badge-test-text">VERSION DE TEST</text>
+    <!-- Review Mode Badge in Header -->
+    <rect x="625" y="8" width="120" height="20" class="badge-mode" />
+    <text x="635" y="22" class="badge-mode-text">REVIEW MODE: ON</text>
 
     <!-- Sidebar (Notes List) -->
     <rect x="0" y="36" width="220" height="364" class="sidebar" />
-    <text x="14" y="60" class="section-label">Cartes modifiees (3)</text>
+    <text x="14" y="60" class="section-label">Modified Cards (3)</text>
     
     <!-- Note Item 1 (Active) -->
     <rect x="10" y="74" width="200" height="42" class="sidebar-item-active" />
-    <text x="20" y="92" class="sidebar-item-active-text">Item 228 - Douleur thoracique</text>
-    <text x="20" y="106" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="10px" fill="#64748b">2 champs modifies</text>
+    <text x="20" y="92" class="sidebar-item-active-text">Acute Coronary Syndrome</text>
+    <text x="20" y="106" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="10px" fill="#64748b">2 fields modified • 4 hunks</text>
 
     <!-- Note Item 2 -->
-    <text x="20" y="136" class="sidebar-item">Item 334 - AVC ischemique</text>
-    <text x="20" y="150" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="10px" fill="#94a3b8">1 champ modifie</text>
+    <text x="20" y="136" class="sidebar-item">Bacterial Meningitis</text>
+    <text x="20" y="150" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="10px" fill="#94a3b8">1 field modified • 1 hunk</text>
 
     <!-- Note Item 3 -->
-    <text x="20" y="180" class="sidebar-item">Item 156 - Arthrose de hanche</text>
-    <text x="20" y="194" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="10px" fill="#94a3b8">Tags ajoutes</text>
+    <text x="20" y="180" class="sidebar-item">Secondary Prevention LDL</text>
+    <text x="20" y="194" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="10px" fill="#94a3b8">Tags and 1 field updated</text>
 
     <!-- Main Content Area -->
     <g transform="translate(235, 46)">
       <!-- Note Header -->
-      <text x="5" y="18" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="15px" font-weight="700" fill="#0f172a">Item 228 : Examen de premiere intention</text>
-      <text x="5" y="34" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="11px" fill="#64748b">Modele : Basique-EDN-Picat | Paquet : EDN::Cardiologie</text>
+      <text x="5" y="18" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="15px" font-weight="700" fill="#0f172a">Acute Coronary Syndrome: initial ECG delay</text>
+      <text x="5" y="34" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="11px" fill="#64748b">Model: Basic (and reversed) | Deck: Medical::Cardiology</text>
 
       <!-- Field 1 Box -->
       <g transform="translate(0, 46)">
         <rect width="510" height="110" class="card-box" />
-        <text x="12" y="20" class="field-label">Champ : Recto (Question)</text>
+        <text x="12" y="20" class="field-label">Field: Front (Question)</text>
         
         <!-- Controls for Field 1 -->
-        <rect x="360" y="8" width="65" height="20" class="btn btn-accept" />
-        <text x="370" y="22" class="btn-accept-text">Accepter</text>
-        <rect x="432" y="8" width="65" height="20" class="btn btn-reject" />
-        <text x="444" y="22" class="btn-reject-text">Rejeter</text>
+        <rect x="345" y="8" width="75" height="20" class="btn btn-accept" />
+        <text x="355" y="22" class="btn-accept-text">Accept Field</text>
+        <rect x="426" y="8" width="75" height="20" class="btn btn-reject" />
+        <text x="435" y="22" class="btn-reject-text">Keep Original</text>
 
         <!-- Diff Text Field 1 -->
-        <text x="12" y="48" class="text-base">Devant une douleur thoracique aigue suspecte de SCA :</text>
+        <text x="12" y="48" class="text-base">In suspected acute coronary syndrome, diagnostic ECG must be done:</text>
         
         <!-- Deletion -->
-        <rect x="12" y="58" width="135" height="22" class="del-box" />
-        <text x="16" y="73" class="del-text">examen sous 30 min</text>
+        <rect x="12" y="58" width="130" height="22" class="del-box" />
+        <text x="16" y="73" class="del-text">within 30 minutes</text>
         
         <!-- Addition -->
-        <rect x="155" y="58" width="195" height="22" class="ins-box" />
-        <text x="160" y="73" class="ins-text">ECG 12D dans les 10 minutes</text>
+        <rect x="150" y="58" width="135" height="22" class="ins-box" />
+        <text x="155" y="73" class="ins-text">within 10 minutes</text>
         
-        <text x="12" y="98" class="text-base">quel est l'acte diagnostique initial immediat ?</text>
+        <text x="12" y="98" class="text-base">upon initial medical contact?</text>
       </g>
 
       <!-- Field 2 Box -->
       <g transform="translate(0, 166)">
         <rect width="510" height="120" class="card-box" />
-        <text x="12" y="20" class="field-label">Champ : Verso (Reponse detaillee)</text>
+        <text x="12" y="20" class="field-label">Field: Back (Detailed Answer)</text>
         
         <!-- Controls for Field 2 -->
-        <rect x="360" y="8" width="65" height="20" class="btn btn-accept" />
-        <text x="370" y="22" class="btn-accept-text">Accepter</text>
-        <rect x="432" y="8" width="65" height="20" class="btn btn-reject" />
-        <text x="444" y="22" class="btn-reject-text">Rejeter</text>
+        <rect x="345" y="8" width="75" height="20" class="btn btn-accept" />
+        <text x="355" y="22" class="btn-accept-text">Accept Field</text>
+        <rect x="426" y="8" width="75" height="20" class="btn btn-reject" />
+        <text x="435" y="22" class="btn-reject-text">Keep Original</text>
 
         <!-- Diff Text Field 2 -->
-        <text x="12" y="48" class="text-base">ECG 12 derivations de repos complet</text>
+        <text x="12" y="48" class="text-base">Standard 12-lead resting electrocardiogram</text>
         
         <!-- Addition -->
         <rect x="12" y="58" width="370" height="22" class="ins-box" />
-        <text x="16" y="73" class="ins-text">+ derivations complementaires V7, V8, V9 et V3R, V4R</text>
+        <text x="16" y="73" class="ins-text">+ additional posterior (V7-V9) and right (V3R-V4R) leads</text>
         
-        <text x="12" y="98" class="text-base">Recherche d'un sus-decalage du segment ST persistant.</text>
+        <text x="12" y="98" class="text-base">Promptly evaluate persistent ST-segment elevation.</text>
       </g>
 
       <!-- Bulk Actions for current note -->
       <g transform="translate(0, 296)">
-        <rect x="0" y="0" width="125" height="24" class="btn btn-edit" />
-        <text x="10" y="16" class="btn-edit-text">Modifier le texte (&lt;&gt;)</text>
+        <rect x="0" y="0" width="115" height="24" class="btn btn-edit" />
+        <text x="10" y="16" class="btn-edit-text">Edit In-Place (&lt;&gt;)</text>
         
         <rect x="290" y="0" width="105" height="24" class="btn btn-accept" />
-        <text x="302" y="16" class="btn-accept-text">Tout accepter</text>
+        <text x="302" y="16" class="btn-accept-text">Accept Note (F2)</text>
 
         <rect x="405" y="0" width="105" height="24" class="btn btn-reject" />
-        <text x="419" y="16" class="btn-reject-text">Tout rejeter</text>
+        <text x="419" y="16" class="btn-reject-text">Reject Note (F3)</text>
       </g>
     </g>
 
@@ -139,14 +139,14 @@
     
     <!-- Summary info -->
     <text x="16" y="430" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="12px" fill="#475569">
-      Progression : 3 notes a examiner | 2 acceptees, 1 en attente
+      Progress: 3 notes selected • 5/5 hunks accepted • Personal notes preserved
     </text>
 
     <!-- Bottom Dialog Buttons -->
-    <rect x="450" y="412" width="140" height="28" class="btn btn-secondary" />
-    <text x="464" y="430" class="btn-secondary-text">Annuler sans modifier</text>
+    <rect x="460" y="412" width="130" height="28" class="btn btn-secondary" />
+    <text x="475" y="430" class="btn-secondary-text">Cancel (No changes)</text>
 
     <rect x="600" y="412" width="145" height="28" class="btn btn-primary" />
-    <text x="612" y="430" class="btn-primary-text">Confirmer l'importation</text>
+    <text x="618" y="430" class="btn-primary-text">Apply Changes</text>
   </g>
 </svg>

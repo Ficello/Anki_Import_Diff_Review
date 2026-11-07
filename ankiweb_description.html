@@ -1,153 +1,156 @@
-<h1>Anki Import Diff Review &amp; AnkiCollab History (Version Test)</h1>
+<h1>Diff Hunk — Anki Import Diff Review &amp; AnkiCollab Safety Gateway</h1>
 
 <p style="font-size: 15px; color: #334155; line-height: 1.6;">
-  <b>Ne perdez plus jamais vos notes personnelles lors d'une mise a jour !</b><br>
-  Par defaut dans Anki, importer un paquet ou synchroniser un deck collaboratif ecrase vos cartes a l'aveugle. 
-  Cet add-on cree un <b>sas de securite</b> : il compare vos cartes existantes avec les nouvelles, vous montre exactement ce qui a change avec un surlignage visuel (rouge/vert), et vous laisse choisir ce que vous gardez.
+  <b>Never lose personal study notes, mnemonics, or custom edits during deck updates again.</b><br>
+  By default, importing an Anki package or syncing a shared deck blindly overwrites existing cards.
+  <b>Diff Hunk</b> creates an isolated safety sandbox: it calculates exact differences between your cards and incoming updates, highlights additions and deletions with high-visibility color coding, and lets you selectively accept or reject modifications at the note, field, or individual text hunk level.
 </p>
 
-<!-- Encadre Avertissement Version Test -->
-<div style="background-color: #fff1f2; border: 1px solid #fecdd3; border-left: 4px solid #e11d48; padding: 14px 18px; margin: 20px 0; border-radius: 4px; color: #881337; line-height: 1.5;">
-  <strong style="text-transform: uppercase; letter-spacing: 0.5px; font-size: 12px;">Avertissement obligatoire - Version de test active :</strong><br>
-  <span style="font-size: 13px;">
-    Cet add-on est en cours de developpement et de test. Comme il supervise l'enregistrement de vos cartes lors des imports, vous devez comprendre son fonctionnement et <b>toujours exporter une sauvegarde complete de votre profil Anki (.colpkg)</b> avant de traiter un paquet volumineux.
+<div style="background-color: #f8fafc; border: 1px solid #cbd5e1; border-left: 4px solid #2563eb; padding: 14px 18px; margin: 20px 0; border-radius: 4px; color: #1e293b; line-height: 1.5;">
+  <strong style="text-transform: uppercase; letter-spacing: 0.5px; font-size: 12px; color: #1d4ed8;">Safety First — Non-Destructive Dry Run :</strong><br>
+  <span style="font-size: 13px; color: #475569;">
+    Diff Hunk uses native SQLite transaction savepoints. If you cancel or close the review window, 100% of the import is aborted and your database remains strictly identical to its pre-import state.
   </span>
 </div>
 
 <hr style="border: none; border-top: 1px solid #e2e8f0; margin: 24px 0;">
 
-<h2>Comment ca fonctionne en 4 etapes ?</h2>
+<h2>Workflow Overview</h2>
 
-<!-- Mockup Schema Flux 4 Etapes (HTML pur sobre) -->
+<p align="center" style="margin: 20px 0;">
+  <img src="https://raw.githubusercontent.com/Ficello/Anki_Import_Diff_Review/main/screenshots/workflow_diagram.svg" alt="Diff Hunk 4-Step Safety Flow" width="760" style="max-width: 100%; height: auto;">
+</p>
+
 <table style="width: 100%; border-collapse: separate; border-spacing: 10px; margin: 15px 0;">
   <tr>
     <td style="width: 25%; vertical-align: top; background: #f8fafc; border: 1px solid #cbd5e1; border-radius: 6px; padding: 12px;">
-      <div style="font-size: 11px; font-weight: 700; color: #2563eb; margin-bottom: 4px;">ETAPE 1</div>
-      <div style="font-weight: 700; font-size: 13px; color: #0f172a; margin-bottom: 6px;">Import ou Synchro</div>
-      <div style="font-size: 12px; color: #475569; line-height: 1.4;">Vous lancez l'importation d'un paquet (.apkg / .csv) ou une synchronisation AnkiCollab.</div>
+      <div style="font-size: 11px; font-weight: 700; color: #2563eb; margin-bottom: 4px;">STEP 1</div>
+      <div style="font-weight: 700; font-size: 13px; color: #0f172a; margin-bottom: 6px;">Import or Sync</div>
+      <div style="font-size: 12px; color: #475569; line-height: 1.4;">You trigger an import (.apkg, .colpkg, .csv) or sync a collaborative deck via AnkiCollab.</div>
     </td>
     <td style="width: 25%; vertical-align: top; background: #f8fafc; border: 1px solid #cbd5e1; border-radius: 6px; padding: 12px;">
-      <div style="font-size: 11px; font-weight: 700; color: #2563eb; margin-bottom: 4px;">ETAPE 2</div>
-      <div style="font-weight: 700; font-size: 13px; color: #0f172a; margin-bottom: 6px;">Sas de Securite</div>
-      <div style="font-size: 12px; color: #475569; line-height: 1.4;">L'extension teste l'importation dans un espace isole. Votre collection reelle n'est pas modifiee.</div>
+      <div style="font-size: 11px; font-weight: 700; color: #2563eb; margin-bottom: 4px;">STEP 2</div>
+      <div style="font-weight: 700; font-size: 13px; color: #0f172a; margin-bottom: 6px;">Safety Sandbox</div>
+      <div style="font-size: 12px; color: #475569; line-height: 1.4;">Diff Hunk simulates the operation in a temporary savepoint without touching your active collection.</div>
     </td>
     <td style="width: 25%; vertical-align: top; background: #f8fafc; border: 1px solid #cbd5e1; border-radius: 6px; padding: 12px;">
-      <div style="font-size: 11px; font-weight: 700; color: #2563eb; margin-bottom: 4px;">ETAPE 3</div>
-      <div style="font-weight: 700; font-size: 13px; color: #0f172a; margin-bottom: 6px;">Revue Visuelle</div>
-      <div style="font-size: 12px; color: #475569; line-height: 1.4;">Une fenetre s'ouvre : le texte supprime est en rouge, les nouveautes en vert. Vous cochez ce qui vous convient.</div>
+      <div style="font-size: 11px; font-weight: 700; color: #2563eb; margin-bottom: 4px;">STEP 3</div>
+      <div style="font-weight: 700; font-size: 13px; color: #0f172a; margin-bottom: 6px;">Visual Review</div>
+      <div style="font-size: 12px; color: #475569; line-height: 1.4;">Color-coded interface opens: green for additions, red for deletions. Review card by card or hunk by hunk.</div>
     </td>
     <td style="width: 25%; vertical-align: top; background: #f8fafc; border: 1px solid #cbd5e1; border-radius: 6px; padding: 12px;">
-      <div style="font-size: 11px; font-weight: 700; color: #2563eb; margin-bottom: 4px;">ETAPE 4</div>
-      <div style="font-weight: 700; font-size: 13px; color: #0f172a; margin-bottom: 6px;">Validation Finale</div>
-      <div style="font-size: 12px; color: #475569; line-height: 1.4;">Seules les modifications que vous avez validees sont enregistrees. Si vous annulez : zero changement.</div>
+      <div style="font-size: 11px; font-weight: 700; color: #2563eb; margin-bottom: 4px;">STEP 4</div>
+      <div style="font-weight: 700; font-size: 13px; color: #0f172a; margin-bottom: 6px;">Selective Commit</div>
+      <div style="font-size: 12px; color: #475569; line-height: 1.4;">Only accepted modifications are applied to your collection. Canceling leaves zero modifications behind.</div>
     </td>
   </tr>
 </table>
 
 <hr style="border: none; border-top: 1px solid #e2e8f0; margin: 24px 0;">
 
-<h2>Illustration : Ce que vous voyez a l'ecran</h2>
+<h2>Visual Interface Preview</h2>
+
+<p align="center" style="margin: 20px 0;">
+  <img src="https://raw.githubusercontent.com/Ficello/Anki_Import_Diff_Review/main/screenshots/diff_preview.svg" alt="Visual Diff Interface Preview" width="760" style="max-width: 100%; height: auto;">
+</p>
+
+<p align="center" style="margin: 20px 0;">
+  <img src="https://raw.githubusercontent.com/Ficello/Anki_Import_Diff_Review/main/screenshots/01_diff_dialog_overview.png" alt="Real Qt Dialog Overview" width="760" style="max-width: 100%; height: auto; border: 1px solid #cbd5e1; border-radius: 6px;">
+</p>
+
+<hr style="border: none; border-top: 1px solid #e2e8f0; margin: 24px 0;">
+
+<h2>How to Use Diff Hunk</h2>
+
+<h3>1. Reviewing Granular Text Changes (Hunk by Hunk)</h3>
+<p style="font-size: 13px; color: #334155; line-height: 1.6;">
+  When an incoming note modifies an existing card, Diff Hunk splits the changes into atomic hunks:
+</p>
+<ul>
+  <li><b>Accept a hunk ([+]) :</b> Adopts the incoming change (highlighted with a green left gutter and green text).</li>
+  <li><b>Reject a hunk ([−]) :</b> Keeps your existing text (marked with a red gutter, retaining your original version).</li>
+  <li><b>Field-level control :</b> Use <i>Accept Field</i> or <i>Keep Original</i> to batch-decide an entire field at once (e.g., accepting an updated medical guideline while preserving a custom clinical note field).</li>
+  <li><b>In-place manual editing :</b> You can directly edit the text in the dialog before confirming. If you want to refine wording or merge personal notes with official updates, click into the editor and type freely.</li>
+</ul>
+
+<h3>2. Tags Management &amp; Inspection</h3>
+<p style="font-size: 13px; color: #334155; line-height: 1.6;">
+  Tag modifications are isolated into a dedicated panel with clear status badges:
+</p>
+<p align="center" style="margin: 15px 0;">
+  <img src="https://raw.githubusercontent.com/Ficello/Anki_Import_Diff_Review/main/screenshots/03_tags_diff_panel.png" alt="Tags Diff Panel" width="720" style="max-width: 100%; height: auto; border: 1px solid #cbd5e1; border-radius: 6px;">
+</p>
+<ul>
+  <li><b>Added tags :</b> Highlighted in bold green chips with a <code>+</code> prefix.</li>
+  <li><b>Removed tags :</b> Displayed in red with strikethrough styling and a <code>−</code> prefix.</li>
+  <li><b>Global tag option :</b> By default, <i>Accept all tags on confirm</i> is enabled, ensuring new categorization tags are adopted without forcing unwanted text replacements.</li>
+</ul>
+
+<h3>3. Lightning-Fast Keyboard Workflow (Review Mode)</h3>
+<p style="font-size: 13px; color: #334155; line-height: 1.6;">
+  Toggle <b>Review Mode</b> in the top-right header to process hundreds of modifications without touching your mouse:
+</p>
+<ul>
+  <li><code>Tab</code> / <code>Shift + Tab</code> : Jump to the next / previous diff hunk.</li>
+  <li><code>Y</code> : Accept the active hunk and automatically jump to the next hunk.</li>
+  <li><code>N</code> : Reject the active hunk and automatically jump to the next hunk.</li>
+  <li><code>Space</code> : Toggle accepted/rejected state of the active hunk in place.</li>
+  <li><code>F2</code> or <code>Alt + A</code> : Accept all changes for the current card.</li>
+  <li><code>F3</code> or <code>Alt + R</code> : Reject all changes for the current card.</li>
+  <li><code>F4</code> or <code>Alt + Shift + T</code> : Accept only tag changes for the current card.</li>
+  <li><code>Down</code> / <code>Up</code> or <code>Right</code> / <code>Left</code> : Navigate between modified cards.</li>
+  <li><code>Enter</code> : Finalize and commit all validated changes.</li>
+  <li><code>Esc</code> : Abort the entire import process.</li>
+</ul>
+
+<h3>4. Anki Browser Dock (Card Explorer Integration)</h3>
+<p style="font-size: 13px; color: #334155; line-height: 1.6;">
+  Diff Hunk is also deeply integrated into Anki's native Card Browser (<i>Browse / Parcourir</i>):
+</p>
+<ul>
+  <li><b>Docked Diff Panel :</b> An interactive panel docks beside the card editor showing recent version diffs and field comparisons.</li>
+  <li><b>History &amp; Collab Tab (<code>Alt + H</code>) :</b> Inspect chronological snapshots and past synchronization events for the selected card.</li>
+  <li><b>Copy Old Fields (<code>Alt + C</code>) :</b> Instantly copies the pre-update content of a note to your system clipboard.</li>
+  <li><b>Smart Filtering :</b> Toggle <i>Only changed fields</i> to hide static fields, or <i>Learned cards only</i> to ignore untouched new cards and focus on active material.</li>
+</ul>
+
+<h3>5. AnkiCollab Seamless Integration &amp; Protected Fields</h3>
+<p style="font-size: 13px; color: #334155; line-height: 1.6;">
+  Fully compatible with the official AnkiCollab add-on (ID <code>1957538407</code>):
+</p>
+<ul>
+  <li>Automatically intercepts remote collaborative updates before they alter your database.</li>
+  <li>Respects protected fields configured in AnkiCollab: protected fields display an amber <i>Protected</i> badge and auto-reject upstream changes to prevent accidental overwrites.</li>
+</ul>
+
+<hr style="border: none; border-top: 1px solid #e2e8f0; margin: 24px 0;">
+
+<h2>Configuration Reference</h2>
 <p style="font-size: 13px; color: #475569;">
-  Voici a quoi ressemble la fenetre de comparaison lorsque de nouvelles informations arrivent sur l'une de vos cartes :
+  Configure settings via <i>Tools &gt; Add-ons &gt; Diff Hunk &gt; Config</i>:
 </p>
-
-<!-- Maquette Visuelle Realiste de la Boite de Dialogue Diff -->
-<div style="background-color: #ffffff; border: 1.5px solid #cbd5e1; border-radius: 8px; overflow: hidden; margin: 18px 0; box-shadow: 0 2px 6px rgba(0,0,0,0.04); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;">
-  
-  <!-- En-tete de la fenetre -->
-  <div style="background: #f1f5f9; padding: 10px 16px; border-bottom: 1px solid #cbd5e1; display: flex; justify-content: space-between; align-items: center;">
-    <span style="font-size: 13px; font-weight: 700; color: #334155;">Fenetre de revue - Carte 1 sur 3 modifiees</span>
-    <span style="font-size: 11px; font-weight: 600; background: #e0f2fe; color: #0369a1; padding: 2px 8px; border-radius: 4px; border: 1px solid #bae6fd;">Paquet : EDN::Cardiologie</span>
-  </div>
-
-  <!-- Corps de la carte -->
-  <div style="padding: 16px; background: #ffffff;">
-    <div style="font-size: 15px; font-weight: 700; color: #0f172a; margin-bottom: 14px;">
-      Item 228 - Douleur thoracique aigue
-    </div>
-
-    <!-- Champ Recto -->
-    <div style="border: 1px solid #e2e8f0; border-radius: 6px; padding: 12px; margin-bottom: 14px; background: #ffffff;">
-      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-        <span style="font-size: 11px; font-weight: 700; color: #64748b; text-transform: uppercase;">Champ : Recto (Enonce)</span>
-        <div>
-          <span style="display: inline-block; padding: 3px 10px; font-size: 11px; font-weight: 600; color: #15803d; background: #f0fdf4; border: 1px solid #86efac; border-radius: 4px; margin-right: 6px;">Conserver cette modification</span>
-          <span style="display: inline-block; padding: 3px 10px; font-size: 11px; font-weight: 600; color: #64748b; background: #f8fafc; border: 1px solid #cbd5e1; border-radius: 4px;">Refuser</span>
-        </div>
-      </div>
-      <div style="font-size: 13px; color: #1e293b; line-height: 1.6;">
-        Devant une suspicion de syndrome coronarien aigu, quel examen doit etre realise 
-        <span style="background-color: #fee2e2; color: #991b1b; text-decoration: line-through; padding: 2px 6px; border-radius: 3px; border: 1px solid #fca5a5;">sous 30 minutes</span> 
-        <span style="background-color: #dcfce7; color: #166534; font-weight: 600; padding: 2px 6px; border-radius: 3px; border: 1px solid #86efac;">dans les 10 minutes</span> ?
-      </div>
-    </div>
-
-    <!-- Champ Verso -->
-    <div style="border: 1px solid #e2e8f0; border-radius: 6px; padding: 12px; background: #ffffff;">
-      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-        <span style="font-size: 11px; font-weight: 700; color: #64748b; text-transform: uppercase;">Champ : Verso (Reponse)</span>
-        <div>
-          <span style="display: inline-block; padding: 3px 10px; font-size: 11px; font-weight: 600; color: #15803d; background: #f0fdf4; border: 1px solid #86efac; border-radius: 4px; margin-right: 6px;">Conserver cette modification</span>
-          <span style="display: inline-block; padding: 3px 10px; font-size: 11px; font-weight: 600; color: #64748b; background: #f8fafc; border: 1px solid #cbd5e1; border-radius: 4px;">Refuser</span>
-        </div>
-      </div>
-      <div style="font-size: 13px; color: #1e293b; line-height: 1.6;">
-        ECG 12 derivations de repos complet
-        <span style="background-color: #dcfce7; color: #166534; font-weight: 600; padding: 2px 6px; border-radius: 3px; border: 1px solid #86efac;">+ derivations complementaires V7, V8, V9 et V3R, V4R</span>.
-      </div>
-    </div>
-  </div>
-
-  <!-- Pied de fenetre -->
-  <div style="background: #f8fafc; padding: 12px 16px; border-top: 1px solid #cbd5e1; display: flex; justify-content: space-between; align-items: center;">
-    <span style="font-size: 12px; color: #64748b;">Astuce : Vous pouvez aussi corriger manuellement le texte avant de valider.</span>
-    <div>
-      <span style="display: inline-block; padding: 6px 14px; font-size: 12px; font-weight: 600; color: #475569; background: #ffffff; border: 1px solid #cbd5e1; border-radius: 4px; margin-right: 8px;">Annuler (Ne rien modifier)</span>
-      <span style="display: inline-block; padding: 6px 14px; font-size: 12px; font-weight: 600; color: #ffffff; background: #2563eb; border: 1px solid #1d4ed8; border-radius: 4px;">Appliquer les modifications</span>
-    </div>
-  </div>
-</div>
-
-<hr style="border: none; border-top: 1px solid #e2e8f0; margin: 24px 0;">
-
-<h2>Ce que cet add-on vous apporte concretement</h2>
 <ul>
-  <li><b>Fini la peur d'importer :</b> Vous ne risquez plus de voir vos propres remarques ou moyens mnemotechniques effaces sans vous en rendre compte.</li>
-  <li><b>Selection au choix :</b> Vous pouvez accepter la mise a jour de la question mais refuser la modification de la reponse si vous aviez deja une formule qui vous convenait.</li>
-  <li><b>Historique dans le Navigateur (Parcourir) :</b> Un volet lateral s'ajoute a la fenetre Parcourir pour vous indiquer en permanence ce qui a change sur vos cartes au fil des versions, avec des filtres pour n'afficher que les cartes que vous etes deja en train d'apprendre.</li>
+  <li><code>visual_diff_enabled</code> (boolean, default: <code>true</code>) : Enables the visual review dialog when importing <code>.apkg</code>, <code>.colpkg</code>, or <code>.csv</code> files.</li>
+  <li><code>ankicollab_diff_enabled</code> (boolean, default: <code>true</code>) : Intercepts incoming AnkiCollab synchronization batches.</li>
+  <li><code>only_changed_fields</code> (boolean, default: <code>true</code>) : Hides identical fields to maximize review efficiency.</li>
+  <li><code>learned_cards_only</code> (boolean, default: <code>true</code>) : Restricts review verification to cards you have already studied (ignoring unstudied new cards).</li>
+  <li><code>accept_all_tags_on_confirm</code> (boolean, default: <code>true</code>) : Adopts incoming tag updates upon confirmation regardless of text hunk decisions.</li>
 </ul>
 
 <hr style="border: none; border-top: 1px solid #e2e8f0; margin: 24px 0;">
 
-<h2>Quels sont les risques reels et que faire pour les eviter ?</h2>
+<h2>Compatibility</h2>
 <ul>
-  <li><b>Risque 1 : Cliquer sur &quot;Tout accepter&quot; sans regarder.</b><br>
-  Si vous validez l'ensemble du paquet sans examiner les cartes, vos modifications personnelles seront remplacees par le contenu du fichier importe. Prenez quelques secondes pour parcourir la liste.</li>
-  
-  <li><b>Risque 2 : Desynchronisation avec AnkiCollab.</b><br>
-  Si vous refusez une modification officielle proposee par le deck collaboratif de votre universite ou promo, votre carte restera dans votre version. Lors de la mise a jour suivante, AnkiCollab vous reproposera la meme modification.</li>
-
-  <li><b>Risque 3 : Coupure d'Anki pendant l'examen des cartes.</b><br>
-  L'extension utilise une simulation technique en coulisses. Si Anki est ferme de force pendant que la fenetre est ouverte, il suffit de lancer <i>Outils &gt; Verifier la base de donnees</i> pour vous assurer que tout est en ordre.</li>
-
-  <li><b>La regle d'or : Sauvegardez regulierement.</b><br>
-  Avant d'importer un deck de plusieurs milliers de cartes, prenez l'habitude d'exporter votre collection complete (<i>Fichier &gt; Exporter &gt; Paquet de collection Anki .colpkg avec medias</i>). En cas de fausse manipulation, vous pourrez revenir en arriere en 10 secondes.</li>
+  <li>Anki 23.10+, Anki 24.x, Anki 25.x+ (Qt6)</li>
+  <li>Windows, macOS, and Linux</li>
+  <li>Seamless compatibility with AnkiCollab (addon 1957538407) and Customize Keyboard Shortcuts (addon 1762336370)</li>
 </ul>
 
 <hr style="border: none; border-top: 1px solid #e2e8f0; margin: 24px 0;">
 
-<h2>A propos &amp; Credits</h2>
+<h2>Credits &amp; Open Source</h2>
 <p style="font-size: 13px; color: #475569; line-height: 1.6;">
-  <b>Auteur &amp; Maintenance :</b> Developpe pour la communaute Anki et l'ecosysteme medical EDN par <b>Ficello</b>.<br>
-  <b>Conception &amp; Tests :</b> Architecture, suite de tests et revue developpees avec <b>Antigravity</b> (Google DeepMind).<br>
-  <b>Depot GitHub :</b> <a href="https://github.com/Ficello/Anki_Import_Diff_Review" style="color: #2563eb; text-decoration: none;">github.com/Ficello/Anki_Import_Diff_Review</a>
+  <b>Author &amp; Maintainer :</b> Ficello (<a href="https://github.com/Ficello" style="color: #2563eb; text-decoration: none;">GitHub</a>)<br>
+  <b>Architecture &amp; Testing :</b> Designed, verified, and test-covered with <b>Antigravity</b> (Google DeepMind).<br>
+  <b>Source Code Repository :</b> <a href="https://github.com/Ficello/Anki_Import_Diff_Review" style="color: #2563eb; text-decoration: none;">github.com/Ficello/Anki_Import_Diff_Review</a>
 </p>
-
-<hr style="border: none; border-top: 1px solid #e2e8f0; margin: 24px 0;">
-
-<h2>Compatibilite</h2>
-<ul>
-  <li>Anki 23.10+, Anki 24.x, Anki 25.x+</li>
-  <li>Windows, macOS et Linux</li>
-  <li>Compatible avec AnkiCollab (addon 1957538407) et les paquets medicaux EDN</li>
-</ul>

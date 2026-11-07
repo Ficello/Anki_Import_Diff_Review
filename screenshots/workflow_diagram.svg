@@ -18,14 +18,14 @@
   <!-- Step 1 -->
   <g transform="translate(20, 20)">
     <rect width="165" height="195" class="step-box" />
-    <text x="14" y="30" class="step-num">ETAPE 1</text>
-    <text x="14" y="52" class="step-title">Import ou Synchro</text>
-    <text x="14" y="80" class="step-desc">Vous lancez l'import</text>
-    <text x="14" y="98" class="step-desc">d'un fichier .apkg, .csv,</text>
-    <text x="14" y="116" class="step-desc">ou une mise a jour d'un</text>
-    <text x="14" y="134" class="step-desc">deck AnkiCollab.</text>
+    <text x="14" y="30" class="step-num">STEP 1</text>
+    <text x="14" y="52" class="step-title">Import or Sync</text>
+    <text x="14" y="80" class="step-desc">You start importing</text>
+    <text x="14" y="98" class="step-desc">an .apkg, .colpkg, or .csv,</text>
+    <text x="14" y="116" class="step-desc">or trigger an AnkiCollab</text>
+    <text x="14" y="134" class="step-desc">shared deck update.</text>
     <rect x="14" y="160" width="135" height="22" class="safe-tag" />
-    <text x="22" y="175" class="safe-tag-text">Option cochee par defaut</text>
+    <text x="22" y="175" class="safe-tag-text">Active by default</text>
   </g>
 
   <!-- Arrow 1 -> 2 -->
@@ -37,14 +37,14 @@
   <!-- Step 2 -->
   <g transform="translate(225, 20)">
     <rect width="165" height="195" class="step-box" />
-    <text x="14" y="30" class="step-num">ETAPE 2</text>
-    <text x="14" y="52" class="step-title">Sas de Securite</text>
-    <text x="14" y="80" class="step-desc">L'extension simule</text>
-    <text x="14" y="98" class="step-desc">l'operation sans toucher</text>
-    <text x="14" y="116" class="step-desc">a votre collection.</text>
-    <text x="14" y="134" class="step-desc">Les deltas sont calcules.</text>
+    <text x="14" y="30" class="step-num">STEP 2</text>
+    <text x="14" y="52" class="step-title">Safety Sandbox</text>
+    <text x="14" y="80" class="step-desc">Diff Hunk simulates the</text>
+    <text x="14" y="98" class="step-desc">import in a safe savepoint</text>
+    <text x="14" y="116" class="step-desc">without touching your</text>
+    <text x="14" y="134" class="step-desc">live flashcard collection.</text>
     <rect x="14" y="160" width="135" height="22" class="safe-tag" />
-    <text x="22" y="175" class="safe-tag-text">Zero risque d'ecrasement</text>
+    <text x="22" y="175" class="safe-tag-text">Zero overwrite risk</text>
   </g>
 
   <!-- Arrow 2 -> 3 -->
@@ -56,14 +56,14 @@
   <!-- Step 3 -->
   <g transform="translate(430, 20)">
     <rect width="165" height="195" class="step-box" />
-    <text x="14" y="30" class="step-num">ETAPE 3</text>
-    <text x="14" y="52" class="step-title">Revue Visuelle</text>
-    <text x="14" y="80" class="step-desc">Fenetre comparative :</text>
-    <text x="14" y="98" class="step-desc">• Rouge = supprime</text>
-    <text x="14" y="116" class="step-desc">• Vert = ajoute</text>
-    <text x="14" y="134" class="step-desc">Vous choisissez carte</text>
-    <text x="14" y="152" class="step-desc">par carte ou champ</text>
-    <text x="14" y="170" class="step-desc">par champ ce qui reste.</text>
+    <text x="14" y="30" class="step-num">STEP 3</text>
+    <text x="14" y="52" class="step-title">Visual Diff Review</text>
+    <text x="14" y="80" class="step-desc">Interactive review window:</text>
+    <text x="14" y="98" class="step-desc">• Red = removed text</text>
+    <text x="14" y="116" class="step-desc">• Green = added text</text>
+    <text x="14" y="134" class="step-desc">Accept or reject each</text>
+    <text x="14" y="152" class="step-desc">chunk, field, or card</text>
+    <text x="14" y="170" class="step-desc">with mouse or keyboard.</text>
   </g>
 
   <!-- Arrow 3 -> 4 -->
@@ -75,13 +75,13 @@
   <!-- Step 4 -->
   <g transform="translate(635, 20)">
     <rect width="145" height="195" class="step-box" />
-    <text x="14" y="30" class="step-num">ETAPE 4</text>
-    <text x="14" y="52" class="step-title">Decision Finale</text>
-    <text x="14" y="80" class="step-desc">• Confirmer : seuls</text>
-    <text x="14" y="98" class="step-desc">les changements</text>
-    <text x="14" y="116" class="step-desc">acceptes sont ecrits.</text>
-    <text x="14" y="140" class="step-desc">• Annuler : tout est</text>
-    <text x="14" y="158" class="step-desc">abandonne, collection</text>
-    <text x="14" y="176" class="step-desc">100% preservee.</text>
+    <text x="14" y="30" class="step-num">STEP 4</text>
+    <text x="14" y="52" class="step-title">Final Decision</text>
+    <text x="14" y="80" class="step-desc">• Apply: only the</text>
+    <text x="14" y="98" class="step-desc">changes you validated</text>
+    <text x="14" y="116" class="step-desc">are written to disk.</text>
+    <text x="14" y="140" class="step-desc">• Cancel: everything</text>
+    <text x="14" y="158" class="step-desc">is aborted; 100% of</text>
+    <text x="14" y="176" class="step-desc">your notes are kept.</text>
   </g>
 </svg>
