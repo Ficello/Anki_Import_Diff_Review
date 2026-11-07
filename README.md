@@ -36,7 +36,7 @@ By default in Anki, importing a shared deck or updating a collaborative package 
 
 ![Visual Diff Interface Preview](screenshots/diff_preview.svg)
 
-![Real Qt Review Dialog Overview](screenshots/01_diff_dialog_overview.png)
+![Diff Hunk Real Review in Anki Browser](screenshots/diff_hunk_overview.png)
 
 ---
 
@@ -46,7 +46,7 @@ By default in Anki, importing a shared deck or updating a collaborative package 
 
 Diff Hunk intelligently tokenizes text differences into atomic change hunks, avoiding false diffs caused by minor whitespace or self-closing HTML tag variations (`<br />` vs `<br>`):
 
-![Granular Hunk Review](screenshots/02_granular_hunk_review.png)
+![Diff Hunk Dock Detail & Inspection](screenshots/diff_hunk_dock_detail.png)
 
 - **Accept hunk (`[+]`)**: Adopts the incoming change. The hunk card highlights in soft green with a prominent green gutter.
 - **Reject hunk (`[−]`)**: Keeps your local version. The hunk card displays a red gutter, retaining your original text.
@@ -59,9 +59,7 @@ Diff Hunk intelligently tokenizes text differences into atomic change hunks, avo
 
 ### 2. Tag Modifications Inspection
 
-Tags are tracked independently from card content in a dedicated comparison panel:
-
-![Tags Comparison Panel](screenshots/03_tags_diff_panel.png)
+Tags are tracked independently from card content in a dedicated comparison panel in the dock:
 
 - **Added tags**: Highlighted as green chips with a `+` badge.
 - **Removed tags**: Rendered with red strikethrough styling and a `−` badge.
