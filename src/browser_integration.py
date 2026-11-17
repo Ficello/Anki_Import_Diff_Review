@@ -101,6 +101,41 @@ def _get_editor_note(editor):
     return None
 
 
+def _sync_editor_with_note(editor, target_note, fields_dict: Optional[Dict[str, str]] = None) -> None:
+    """Met à jour la note en mémoire de l'éditeur et recharge son affichage."""
+    if not editor or not target_note:
+        return
+    try:
+        ed_note = _get_editor_note(editor)
+        target_nid = getattr(target_note, "id", None)
+        if ed_note is not None:
+            ed_nid = getattr(ed_note, "id", None)
+            real_ed_nid = _staged_to_orig.get(ed_nid, ed_nid) if ed_nid else None
+            if ed_nid == target_nid or real_ed_nid == target_nid:
+                if fields_dict:
+                    for name, val in fields_dict.items():
+                        if name == "__tags__":
+                            ed_note.tags = list(target_note.tags)
+                        elif name in ed_note:
+                            ed_note[name] = val
+                else:
+                    for name, val in target_note.items():
+                        if name in ed_note:
+                            ed_note[name] = val
+                    ed_note.tags = list(target_note.tags)
+                if hasattr(editor, "loadNote"):
+                    editor.loadNote()
+                elif hasattr(editor, "reload_note"):
+                    editor.reload_note()
+                return
+        if hasattr(editor, "loadNote"):
+            editor.loadNote()
+        elif hasattr(editor, "reload_note"):
+            editor.reload_note()
+    except Exception:
+        pass
+
+
 def set_pending_diffs(diffs: List[NoteDiff], on_commit, is_collab: Optional[bool] = None) -> None:
     """Enregistre les diffs à valider via le browser/éditeur natif."""
     global _pending_diffs, _on_commit_cb, _committed, _staged_to_orig, _is_collab_session
@@ -1133,12 +1168,25 @@ class DiffBrowserPanel(QtWidgets.QWidget):
         self._setup_shortcuts()
         self._inject_into_browser_splitter()
 
+        # Synchroniser l'éditeur déjà chargé avant d'installer le hook d'édition
+        if self._browser is not None and getattr(self._browser, "editor", None) is not None:
+            try:
+                ed = self._browser.editor
+                ed_note = _get_editor_note(ed)
+                if ed_note and getattr(ed_note, "id", None):
+                    self.set_current_editor(ed)
+                    self.select_note(ed_note.id)
+            except Exception:
+                pass
+
         # Hooks
         gui_hooks.browser_did_change_row.append(self._on_browser_row_changed)
         self._install_field_edit_hook()
         _patch_editor_save_for_diff()
         if self._learned_cards_only:
             self._apply_learned_cards_filter(True)
+            if self._is_collab and not self.get_learned_diff_nids() and _pending_diffs:
+                QtCore.QTimer.singleShot(200, self.prompt_empty_learned_diff_decision)
 
     def _inject_into_browser_splitter(self) -> None:
         """
@@ -1323,8 +1371,127 @@ class DiffBrowserPanel(QtWidgets.QWidget):
         btn_all.clicked.connect(lambda: self._btn_learned_only.setChecked(False) if getattr(self, "_btn_learned_only", None) else None)
         layout.addWidget(btn_all)
 
+        btn_accept = QtWidgets.QPushButton("Accepter sans regarder", w)
+        btn_accept.setCursor(QtGui.QCursor(_Qt.CursorShape.PointingHandCursor))
+        btn_accept.setStyleSheet(_get_style_btn_secondary())
+        btn_accept.setMinimumHeight(28)
+        btn_accept.setToolTip("Applique l'ensemble des modifications en attente directement dans votre collection")
+        btn_accept.clicked.connect(self._accept_all_without_review)
+        layout.addWidget(btn_accept)
+
         layout.addStretch()
         return w
+
+    def _accept_all_without_review(self) -> None:
+        """Accepte et enregistre l'ensemble des modifications en attente directement dans la collection."""
+        if hasattr(self, "_apply_all_import_tags"):
+            self._apply_all_import_tags()
+        else:
+            try:
+                apply_all_pending_import_tags()
+            except Exception:
+                pass
+        self.apply_commit(close_browser=True)
+
+    def prompt_empty_learned_diff_decision(self) -> None:
+        """
+        Affiche une notification lorsque le filtre 'Cartes apprises' est actif mais
+        qu'aucune carte apprise n'est modifiee (nid:0), proposant d'examiner
+        les autres modifications ou d'accepter directement sans regarder.
+        """
+        global _empty_learned_hook
+        try:
+            from aqt.qt import sip
+            if sip.isdeleted(self) or not getattr(self, "_browser", None) or sip.isdeleted(self._browser):
+                return
+        except Exception:
+            return
+
+        if not getattr(self, "_learned_cards_only", False):
+            return
+
+        learned_nids = self.get_learned_diff_nids()
+        if learned_nids or not _pending_diffs:
+            return
+
+        if _empty_learned_hook is not None:
+            res = _empty_learned_hook()
+            if res == "show_all":
+                if hasattr(self, "_btn_learned_only") and self._btn_learned_only:
+                    self._btn_learned_only.setChecked(False)
+            elif res == "accept_all":
+                self._accept_all_without_review()
+            return
+
+        if os.environ.get("QT_QPA_PLATFORM") == "offscreen" or os.environ.get("PYTEST_CURRENT_TEST"):
+            return
+
+        dlg = QtWidgets.QDialog(self._browser)
+        dlg.setWindowTitle("Aucune carte apprise modifiée")
+        dlg.setModal(True)
+        dlg.resize(440, 180)
+        try:
+            from .ui import _get_style_base
+            dlg.setStyleSheet(_get_style_base())
+        except Exception:
+            pass
+
+        dlg_layout = QtWidgets.QVBoxLayout(dlg)
+        dlg_layout.setContentsMargins(20, 20, 20, 20)
+        dlg_layout.setSpacing(12)
+
+        total_diffs = len(_pending_diffs)
+        t_label = QtWidgets.QLabel(f"Aucune carte déjà apprise n'est modifiée parmi les {total_diffs} note(s) en attente.", dlg)
+        t_label.setStyleSheet(f"font-size: 13px; font-weight: 700; color: {_CLR_HDR_FG};")
+        t_label.setWordWrap(True)
+        dlg_layout.addWidget(t_label)
+
+        sub_label = QtWidgets.QLabel(
+            "Le filtre 'Uniquement cartes apprises' est actif, mais toutes les modifications concernent "
+            "des cartes non encore révisées ou de nouvelles cartes.\n\n"
+            "Que souhaitez-vous faire ?",
+            dlg,
+        )
+        sub_label.setStyleSheet(f"font-size: 12px; color: {_CLR_TEXT};")
+        sub_label.setWordWrap(True)
+        dlg_layout.addWidget(sub_label)
+
+        btn_box = QtWidgets.QHBoxLayout()
+        btn_box.setSpacing(10)
+
+        btn_view_other = QtWidgets.QPushButton("Voir les autres modifs", dlg)
+        btn_view_other.setCursor(QtGui.QCursor(_Qt.CursorShape.PointingHandCursor))
+        btn_view_other.setFixedHeight(30)
+        try:
+            btn_view_other.setStyleSheet(_get_style_btn_primary())
+        except Exception:
+            pass
+
+        btn_accept_all = QtWidgets.QPushButton("Accepter sans regarder", dlg)
+        btn_accept_all.setCursor(QtGui.QCursor(_Qt.CursorShape.PointingHandCursor))
+        btn_accept_all.setFixedHeight(30)
+        try:
+            btn_accept_all.setStyleSheet(_get_style_btn_secondary())
+        except Exception:
+            pass
+
+        btn_box.addWidget(btn_view_other)
+        btn_box.addWidget(btn_accept_all)
+        dlg_layout.addLayout(btn_box)
+
+        def on_view():
+            dlg.accept()
+            if hasattr(self, "_btn_learned_only") and self._btn_learned_only:
+                self._btn_learned_only.setChecked(False)
+
+        def on_accept():
+            dlg.accept()
+            self._accept_all_without_review()
+
+        btn_view_other.clicked.connect(on_view)
+        btn_accept_all.clicked.connect(on_accept)
+
+        dlg.exec()
 
     def _save_current_layout(self) -> None:
         try:
@@ -2253,13 +2420,7 @@ class DiffBrowserPanel(QtWidgets.QWidget):
                             comment="Restauration d'une version précédente" if len(fields) > 1 else f"Restauration du champ {next(iter(fields.keys()))}",
                             tags=target_note.tags,
                         )
-                        if hasattr(self._browser, "editor") and self._browser.editor:
-                            if hasattr(self._browser.editor, "reload_note"):
-                                self._browser.editor.reload_note()
-                            elif hasattr(self._browser.editor, "loadNote"):
-                                self._browser.editor.loadNote()
-                        if hasattr(self._browser, "loadNote"):
-                            self._browser.loadNote()
+                        _sync_editor_with_note(getattr(self._browser, "editor", None), target_note, fields)
                         if hasattr(self._browser, "on_notes_changed"):
                             self._browser.on_notes_changed()
                         label = "Version restaurée avec succès" if len(fields) > 1 else f"Champ restauré avec succès"
@@ -2274,6 +2435,8 @@ class DiffBrowserPanel(QtWidgets.QWidget):
                     self._history_tab_widget._current_fields["__tags__"] = new_val
                     self._history_tab_widget._render_comparison_view()
                 continue
+            if diff is not None:
+                diff.custom_edit_fields.pop(fname, None)
             fp = panel._field_panels.get(fname)
             if fp is not None:
                 from .diff import compute_hunks
@@ -2289,6 +2452,15 @@ class DiffBrowserPanel(QtWidgets.QWidget):
                     h.accepted = True
                 fp._refresh_display()
                 fp.previewChanged.emit()
+            elif diff is not None:
+                diff.merged_fields[fname] = new_val
+                editor = self.get_editor_for_note(note_id)
+                if editor:
+                    ed_note = _get_editor_note(editor)
+                    if ed_note and fname in ed_note:
+                        ed_note[fname] = new_val
+                        if hasattr(editor, "loadNote"):
+                            editor.loadNote()
         panel._sync_all_merged_then_editor()
 
     def _on_history_fields_protected(self, note_id: int, fields: dict) -> None:
@@ -2876,7 +3048,7 @@ class DiffBrowserPanel(QtWidgets.QWidget):
         msg_box.setStandardButtons(
             QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No
         )
-        msg_box.setDefaultButton(QtWidgets.QMessageBox.StandardButton.No)
+        msg_box.setDefaultButton(QtWidgets.QMessageBox.StandardButton.Yes)
 
         cfg_default_tags = True
         try:
@@ -4212,6 +4384,7 @@ def open_browser_diff(diffs: List[NoteDiff], on_commit, is_collab: bool = False)
     browser.raise_()
 
 _decision_hook = None  # Hook de test
+_empty_learned_hook = None  # Hook de test : callable retournant 'show_all', 'accept_all' ou 'cancel'
 _commit_confirmation_hook = None  # Hook de test : callable retournant bool (confirmed) ou tuple[bool, bool] (confirmed, accept_all_tags)
 _is_prompting_decision = False
 _last_prompt_decision_time = 0.0
@@ -4533,9 +4706,10 @@ def _show_standalone_history(browser) -> None:
             browser.col.update_note(target_note)
             
             # Recharger l'éditeur et la table
+            _sync_editor_with_note(getattr(browser, "editor", None), target_note, fields)
             try:
-                browser.loadNote()
-                browser.on_notes_changed()
+                if hasattr(browser, "on_notes_changed"):
+                    browser.on_notes_changed()
             except Exception:
                 pass
 
@@ -4654,9 +4828,10 @@ def _show_reviewer_history() -> None:
 
             # Si le browser est ouvert et affiche cette note, le recharger
             if hasattr(mw, "browser") and mw.browser:
+                _sync_editor_with_note(getattr(mw.browser, "editor", None), target_note, fields)
                 try:
-                    mw.browser.loadNote()
-                    mw.browser.on_notes_changed()
+                    if hasattr(mw.browser, "on_notes_changed"):
+                        mw.browser.on_notes_changed()
                 except Exception:
                     pass
             
@@ -4802,13 +4977,7 @@ def _show_editor_history(editor: Any) -> None:
             mw.col.update_note(target_note)
             
             # Recharger l'éditeur
-            try:
-                if hasattr(editor, "reload_note"):
-                    editor.reload_note()
-                elif hasattr(editor, "loadNote"):
-                    editor.loadNote()
-            except Exception:
-                pass
+            _sync_editor_with_note(editor, target_note, fields)
 
             # Si le reviewer affiche cette carte, la recharger
             if mw.reviewer and mw.reviewer.card and mw.reviewer.card.nid == current_nid:

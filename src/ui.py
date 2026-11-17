@@ -1262,7 +1262,7 @@ class FieldDiffPanel(QtWidgets.QFrame, PaletteMixin):
 
     def _refresh_display(self):
         c = self._palette_colors()
-        is_unchanged = (self.old_orig == self.prop_orig)
+        is_unchanged = not self.is_changed()
 
         if self._protected:
             self._badge.setText("Protégé")
@@ -1878,6 +1878,8 @@ class NoteDiffPanel(QtWidgets.QScrollArea, PaletteMixin):
                     self._history_panel._current_fields["__tags__"] = new_val
                     self._history_panel._render_comparison_view()
                 continue
+            if self.note is not None and hasattr(self.note, "custom_edit_fields"):
+                self.note.custom_edit_fields.pop(field_name, None)
             fp = self._field_panels.get(field_name)
             if fp is not None:
                 from .diff import compute_hunks
@@ -1899,6 +1901,8 @@ class NoteDiffPanel(QtWidgets.QScrollArea, PaletteMixin):
         for field_name in fields:
             if field_name == "__tags__":
                 continue
+            if self.note is not None and hasattr(self.note, "custom_edit_fields"):
+                self.note.custom_edit_fields.pop(field_name, None)
             fp = self._field_panels.get(field_name)
             if fp is not None:
                 fp._protected = True

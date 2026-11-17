@@ -2744,6 +2744,78 @@ def test_learned_cards_filter_with_zero_learned_cards():
         clear_pending_diffs()
 
 
+def test_empty_learned_diff_notification_show_all():
+    """Verifie que lorsque 0 cartes apprises sont modifiees, l'option 'Voir les autres modifs' desactive le filtre."""
+    from anki_import_diff.src.browser_integration import (
+        DiffBrowserPanel, NoteDiff, set_pending_diffs, clear_pending_diffs,
+    )
+    import anki_import_diff.src.browser_integration as bi
+    db = MockAnkiDB()
+    col = MockCollection(db)
+    # Deux notes non apprises
+    db.execute(
+        "INSERT INTO cards (id, nid, did, ord, mod, usn, type, queue, due, ivl, factor, reps, lapses, left, odue, odid, flags, data) "
+        "VALUES (1, 101, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, '')"
+    )
+    browser = _create_test_browser()
+    browser.col = col
+
+    diff1 = NoteDiff(note_id=101, original_fields={"A": "1"}, updated_fields={"A": "2"}, model_name="B", field_names=["A"], action="UPDATE")
+    set_pending_diffs([diff1], lambda x: None, is_collab=True)
+
+    panel = None
+    try:
+        bi._empty_learned_hook = lambda: "show_all"
+        panel = DiffBrowserPanel(browser, is_collab=True)
+        # Verifier l'etat initial du filtre
+        assert panel._btn_learned_only.isChecked() is True
+        # Declencher la notification
+        panel.prompt_empty_learned_diff_decision()
+        # Le filtre learned doit maintenant etre desactive et toutes les cartes visibles
+        assert panel._btn_learned_only.isChecked() is False
+        assert browser.search_query == "nid:101"
+    finally:
+        bi._empty_learned_hook = None
+        if panel is not None:
+            panel.cleanup()
+        clear_pending_diffs()
+
+
+def test_empty_learned_diff_notification_accept_all():
+    """Verifie que l'option 'Accepter sans regarder' committe directement toutes les notes."""
+    from anki_import_diff.src.browser_integration import (
+        DiffBrowserPanel, NoteDiff, set_pending_diffs, clear_pending_diffs,
+    )
+    import anki_import_diff.src.browser_integration as bi
+    db = MockAnkiDB()
+    col = MockCollection(db)
+    db.execute(
+        "INSERT INTO cards (id, nid, did, ord, mod, usn, type, queue, due, ivl, factor, reps, lapses, left, odue, odid, flags, data) "
+        "VALUES (1, 101, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, '')"
+    )
+    browser = _create_test_browser()
+    browser.col = col
+
+    committed_list = []
+    diff1 = NoteDiff(note_id=101, original_fields={"A": "1"}, updated_fields={"A": "2"}, model_name="B", field_names=["A"], action="UPDATE")
+    set_pending_diffs([diff1], lambda acc: committed_list.extend(acc), is_collab=True)
+
+    panel = None
+    try:
+        bi._empty_learned_hook = lambda: "accept_all"
+        panel = DiffBrowserPanel(browser, is_collab=True)
+        panel.prompt_empty_learned_diff_decision()
+        # Verifier que l'importation a ete confirmee et enregistree
+        assert len(committed_list) == 1
+        assert committed_list[0].note_id == 101
+        assert bi._committed is True
+    finally:
+        bi._empty_learned_hook = None
+        if panel is not None:
+            panel.cleanup()
+        clear_pending_diffs()
+
+
 def test_learned_cards_filter_persistence(tmp_path, monkeypatch):
     """Verifie que l'etat du filtre cartes deja apprises est persiste et recharge."""
     from anki_import_diff.src.browser_integration import DiffBrowserPanel, NoteDiff, set_pending_diffs, clear_pending_diffs, _save_browser_state, _load_browser_layout_state
@@ -2996,4 +3068,35 @@ def test_note_diff_panel_with_sync_queries_protected_db(monkeypatch):
     assert panel._field_panels["F1"]._protected is True
     assert panel._field_panels["F2"]._protected is False
     assert panel._field_panels["F1"].get_merged_value() == "Old1"
+
+
+def test_capture_import_changes_ignores_cosmetic_html_only_update(mock_env):
+    """Cosmetic HTML-only updates (<br> vs <br/>, quote style) are filtered out as no-ops."""
+    mock_env.col.db.execute(
+        "INSERT INTO notes (id, mid, flds, tags) VALUES (2001, 1, ?, ' tag1 ')",
+        ("Front\x1fSurvie<br>Mortalité<span class='x'>!</span>",),
+    )
+
+    def run_cosmetic_update():
+        mock_env.col.db.execute(
+            "UPDATE notes SET flds=? WHERE id=2001",
+            ('Front\x1fSurvie<br/>Mortalité<span class="x">!</span>',),
+        )
+
+    diffs = capture_import_changes(run_cosmetic_update)
+    assert diffs == []
+
+
+def test_field_diff_panel_cosmetic_html_marked_unchanged(mock_env):
+    """FieldDiffPanel._refresh_display treats cosmetic HTML differences as unchanged."""
+    from anki_import_diff.src.ui import FieldDiffPanel
+
+    fp = FieldDiffPanel(
+        "Cartes liées",
+        "Survie<br>Mortalité",
+        "Survie<br/>Mortalité",
+    )
+    assert fp.is_changed() is False
+    assert fp._badge.text() == "Inchangé"
+
 

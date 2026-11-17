@@ -388,9 +388,15 @@ def capture_import_changes(import_fn: Callable[..., Any], *args: Any, **kwargs: 
                         orig_tags = [t for t in (old_tags_str or "").strip().split(" ") if t] if old_tags_str is not None else []
                         upd_tags = [t for t in (new_tags_str or tags_str or "").strip().split(" ") if t]
 
-                    # Filter out no-op updates where neither fields nor tags changed
-                    if action == "UPDATE" and old_flds_str == new_flds_str and set(orig_tags) == set(upd_tags):
-                        continue
+                    # Filter out no-op updates where neither fields (ignoring cosmetic HTML) nor tags changed
+                    if action == "UPDATE" and set(orig_tags) == set(upd_tags):
+                        if old_flds_str == new_flds_str:
+                            continue
+                        from .diff import normalize_html_tags
+                        old_s = old_flds_str.decode("utf-8", "surrogatepass") if isinstance(old_flds_str, bytes) else (old_flds_str or "")
+                        new_s = new_flds_str.decode("utf-8", "surrogatepass") if isinstance(new_flds_str, bytes) else (new_flds_str or "")
+                        if normalize_html_tags(old_s) == normalize_html_tags(new_s):
+                            continue
 
                     tags = list(upd_tags)
                     

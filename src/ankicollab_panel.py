@@ -45,6 +45,23 @@ from .history import (
 from .ankicollab_bridge import AnkiCollabBridge, CollabCommit, CollabSuggestion
 from .ui import get_colors, ThemeColor, safe_timer_set_text
 
+def _copy_html_to_clipboard(html_val: str) -> bool:
+    """Copie du HTML dans le presse-papier en tant que texte formaté (HTML + texte brut lisible)."""
+    app = QtWidgets.QApplication.instance()
+    if not app:
+        return False
+    clipboard = app.clipboard()
+    if not clipboard:
+        return False
+    mime = QtCore.QMimeData()
+    mime.setHtml(html_val)
+    doc = QtGui.QTextDocument()
+    doc.setHtml(html_val)
+    mime.setText(doc.toPlainText())
+    clipboard.setMimeData(mime)
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Palette & Styles
 # ---------------------------------------------------------------------------
@@ -278,13 +295,9 @@ class FieldComparisonCard(QtWidgets.QFrame):
         )
 
         def _do_copy():
-            app = QtWidgets.QApplication.instance()
-            if app:
-                clipboard = app.clipboard()
-                if clipboard:
-                    clipboard.setText(value)
-                    btn_copy.setText("Copié !")
-                    safe_timer_set_text(btn_copy, "Copier", 1500)
+            if _copy_html_to_clipboard(value):
+                btn_copy.setText("Copié !")
+                safe_timer_set_text(btn_copy, "Copier", 1500)
 
         btn_copy.clicked.connect(_do_copy)
         top_bar.addWidget(btn_copy)

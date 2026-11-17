@@ -606,6 +606,7 @@ def sync_editor_from_hunks(editor, diff: "NoteDiff") -> None:
             pass
 
     finally:
+        diff._synced_to_editor = True
         diff._syncing_to_editor = False
         diff._last_sync_time = time.monotonic()
 
@@ -669,6 +670,8 @@ def make_field_edit_hook(get_diff_for_note, on_field_edited_cb=None):
         Appelé par Anki quand un champ perd le focus.
         Retourne True si on a modifié le champ (pour que Anki sache).
         """
+        if not changed:
+            return changed
         note = _get_editor_note(editor)
         if note is None:
             note = editor

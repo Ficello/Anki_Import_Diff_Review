@@ -521,3 +521,59 @@ def test_api_client(qtbot):
                     print(f"  Item: {item}")
     except Exception as e:
         print(f"\n[API] Failed: {e}")
+
+
+def test_field_comparison_card_copy_formatted_text(qtbot):
+    """Copier un champ dans l'historique copie le texte formaté (HTML + texte brut lisible), pas le HTML brut en texte."""
+    from PyQt6 import QtWidgets
+    from anki_import_diff.src.ankicollab_panel import FieldComparisonCard
+
+    card = FieldComparisonCard(
+        field_name="Recto",
+        old_val="<div><b>Titre</b><br>Contenu ancien</div>",
+        new_val="<div><b>Titre</b><br>Contenu nouveau</div>",
+        current_val="<div><b>Titre</b><br>Contenu nouveau</div>",
+        old_title="Avant",
+        new_title="Après",
+        render_mode="diff",
+    )
+    qtbot.addWidget(card)
+
+    copy_btns = [b for b in card.findChildren(QtWidgets.QPushButton) if b.text() == "Copier"]
+    assert len(copy_btns) == 2
+    copy_btns[0].click()
+
+    app = QtWidgets.QApplication.instance()
+    clipboard = app.clipboard()
+    mime = clipboard.mimeData()
+    assert mime.hasHtml()
+    assert "<b>Titre</b>" in mime.html()
+    assert "<div>" not in clipboard.text()
+    assert "Titre\nContenu ancien" == clipboard.text()
+
+
+def test_sync_editor_with_note_updates_in_memory_note():
+    """_sync_editor_with_note met à jour editor.note en mémoire et appelle loadNote()."""
+    from anki_import_diff.src.browser_integration import _sync_editor_with_note
+
+    class FakeNote(dict):
+        def __init__(self, nid, data, tags):
+            super().__init__(data)
+            self.id = nid
+            self.tags = list(tags)
+
+    class FakeEditor:
+        def __init__(self, note):
+            self.note = note
+            self.loaded = False
+
+        def loadNote(self):
+            self.loaded = True
+
+    ed_note = FakeNote(42, {"Recto": "Nouveau", "Verso": "V1"}, ["tag1"])
+    target_note = FakeNote(42, {"Recto": "Ancien", "Verso": "V1"}, ["tag1", "tag2"])
+    editor = FakeEditor(ed_note)
+
+    _sync_editor_with_note(editor, target_note, {"Recto": "Ancien"})
+    assert editor.note["Recto"] == "Ancien"
+    assert editor.loaded is True
