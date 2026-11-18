@@ -41,8 +41,47 @@ class DiffHunk:
 _CONTEXT_CHARS = 60  # characters of context to show around each hunk
 
 
+_RE_CLICKABLE_KBD = re.compile(
+    r'(<kbd\b[^>]*\bclass="[^"]*\bclickable_cards\b[^"]*"[^>]*>)((?:(?!</?kbd\b)[^\x1f])*)(</kbd>)',
+    re.IGNORECASE | re.DOTALL,
+)
+_RE_EDN_NID_SPAN = re.compile(
+    r'<span\b[^>]*\bclass="[^"]*\bedn-nid\b[^"]*"[^>]*>\s*(\d+)\s*</span>',
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _normalize_clickable_kbd_badges(text: str) -> str:
+    """Ignore les attributs d'édition/accessibilité (contenteditable, tabindex, data-nid redondant) retirés par AnkiCollab."""
+    if "clickable_cards" not in text:
+        return text
+
+    def _norm_kbd(m: re.Match) -> str:
+        open_tag, inner, close_tag = m.group(1), m.group(2), m.group(3)
+        open_tag = re.sub(
+            r'\s+(?:contenteditable|tabindex|onclick|ondblclick)="[^"]*"',
+            "",
+            open_tag,
+            flags=re.IGNORECASE,
+        )
+        has_nid_in_body = bool(_RE_EDN_NID_SPAN.search(inner))
+        if not has_nid_in_body:
+            data_nid_m = re.search(r'\bdata-nid="(\d+)"', open_tag, flags=re.IGNORECASE)
+            if data_nid_m:
+                plain_inner = re.sub(r"<[^>]+>|\s+", "", inner)
+                if plain_inner == data_nid_m.group(1):
+                    has_nid_in_body = True
+        if has_nid_in_body:
+            open_tag = re.sub(r'\s+data-nid="[^"]*"', "", open_tag, flags=re.IGNORECASE)
+        open_tag = re.sub(r"\s{2,}", " ", open_tag)
+        open_tag = re.sub(r"\s+>$", ">", open_tag)
+        return f"{open_tag}{inner}{close_tag}"
+
+    return _RE_CLICKABLE_KBD.sub(_norm_kbd, text)
+
+
 def normalize_html_tags(text: str) -> str:
-    """Normalise les guillemets, balises auto-fermantes et espaces mineurs dans les balises pour éviter les faux diffs."""
+    """Normalise les guillemets, balises auto-fermantes, attributs de badges et espaces mineurs pour éviter les faux diffs."""
     if not text:
         return ""
     def norm_tag(m):
@@ -55,7 +94,8 @@ def normalize_html_tags(text: str) -> str:
         # Normaliser les espaces internes avant la fermeture >
         tag = re.sub(r"\s+>$", ">", tag)
         return tag
-    return re.sub(r"<[^>]+>", norm_tag, text)
+    normalized = re.sub(r"<[^>]+>", norm_tag, text)
+    return _normalize_clickable_kbd_badges(normalized)
 
 
 def _tokenize(text: str) -> List[str]:

@@ -509,24 +509,45 @@ def sync_tags_to_editor(editor, tags: list[str]) -> None:
         pass
 
 
-def sync_editor_from_hunks(editor, diff: "NoteDiff") -> None:
+def sync_editor_from_hunks(
+    editor,
+    diff: "NoteDiff",
+    only_fields: Optional[set[str]] = None,
+    sync_tags: bool = True,
+) -> None:
     """
     Injecte les valeurs mergées (selon l'état courant des hunks) dans les champs
     de l'éditeur natif via JavaScript, sans rechargement complet de la note.
 
     Met à jour simultanément tous les champs modifiés (batch) pour garantir
     que le recto ET le verso s'actualisent toujours ensemble sans être ignorés.
+
+    Si `only_fields` est fourni, seuls ces champs sont synchronisés dans l'éditeur.
+    Si `sync_tags` est False, les tags de l'éditeur ne sont pas modifiés.
     """
     import sys
     if editor is None or not hasattr(editor, "web"):
         return
 
+    note = _get_editor_note(editor)
+    if note is None:
+        note = getattr(editor, "note", None)
+
+    # Sécurité : ne jamais écrire dans une note de l'éditeur qui ne correspond pas à ce diff
+    note_id = getattr(note, "id", None) if note is not None else None
+    if note_id and getattr(diff, "note_id", None):
+        valid_ids = {diff.note_id}
+        staged_id = getattr(diff, "staged_note_id", 0)
+        if staged_id:
+            valid_ids.add(staged_id)
+        if note_id not in valid_ids:
+            if _DEBUG_SYNC:
+                print(f"[anki-diff] sync_editor_from_hunks skipped: editor note={note_id} != diff.note_id={diff.note_id}")
+            return
+
     diff._syncing_to_editor = True
     diff._last_sync_time = time.monotonic()
     try:
-        note = _get_editor_note(editor)
-        if note is None:
-            note = getattr(editor, "note", None)
         if _DEBUG_SYNC:
             print(f"[anki-diff] sync_editor_from_hunks: editor ok, note={getattr(note,'id',None)}, diff.note_id={diff.note_id}")
 
@@ -534,6 +555,8 @@ def sync_editor_from_hunks(editor, diff: "NoteDiff") -> None:
             if getattr(diff, "action", "") != "INSERT":
                 fields_to_sync = {}
                 for idx, field_name in enumerate(diff.field_names):
+                    if only_fields is not None and field_name not in only_fields:
+                        continue
                     old_val = diff.original_fields.get(field_name, "")
                     fields_to_sync[idx] = old_val
                     if note and hasattr(note, "fields") and idx < len(note.fields):
@@ -541,36 +564,42 @@ def sync_editor_from_hunks(editor, diff: "NoteDiff") -> None:
                 if fields_to_sync:
                     js = _SET_FIELDS_BATCH_JS % json.dumps(fields_to_sync)
                     _eval_js(editor, js)
-                clear_field_highlights(editor)
-                tags_to_sync = diff.original_tags if diff.original_tags else diff.tags
-                sync_tags_to_editor(editor, tags_to_sync)
+                if only_fields is None:
+                    clear_field_highlights(editor)
+                if sync_tags:
+                    tags_to_sync = diff.original_tags if diff.original_tags else diff.tags
+                    sync_tags_to_editor(editor, tags_to_sync)
             return
 
-        # Index des champs modifiés (pour le surlignage)
-        modified_indices = []
-        for idx, field_name in enumerate(diff.field_names):
-            old_val = diff.original_fields.get(field_name, "")
-            new_val = diff.updated_fields.get(field_name, "")
-            if old_val != new_val:
-                modified_indices.append(idx)
+        if only_fields is None:
+            # Index des champs modifiés (pour le surlignage)
+            modified_indices = []
+            for idx, field_name in enumerate(diff.field_names):
+                old_val = diff.original_fields.get(field_name, "")
+                new_val = diff.updated_fields.get(field_name, "")
+                if normalize_html_tags(old_val) != normalize_html_tags(new_val):
+                    modified_indices.append(idx)
 
-        # D'abord, surligner les champs modifiés (jaune)
-        highlight_js = _HIGHLIGHT_MODIFIED_FIELDS_JS % json.dumps(modified_indices)
-        _eval_js(editor, highlight_js)
+            # D'abord, surligner les champs modifiés (jaune)
+            highlight_js = _HIGHLIGHT_MODIFIED_FIELDS_JS % json.dumps(modified_indices)
+            _eval_js(editor, highlight_js)
 
         # Collecter tous les champs modifiés à synchroniser en un seul appel JS batch
         fields_to_sync = {}
         for idx, field_name in enumerate(diff.field_names):
+            if only_fields is not None and field_name not in only_fields:
+                continue
+
             old_val = diff.original_fields.get(field_name, "")
             new_val = diff.updated_fields.get(field_name, "")
             merged_val = diff.merged_fields.get(field_name, "")
 
-            has_diff = (old_val != new_val)
+            has_diff = (normalize_html_tags(old_val) != normalize_html_tags(new_val))
             is_custom = field_name in diff.custom_edit_fields
-            if is_custom:
+            if only_fields is None and is_custom:
                 continue
 
-            if not has_diff:
+            if not has_diff and only_fields is None:
                 continue
 
             if note and hasattr(note, "fields") and idx < len(note.fields):
@@ -582,9 +611,10 @@ def sync_editor_from_hunks(editor, diff: "NoteDiff") -> None:
             js = _SET_FIELDS_BATCH_JS % json.dumps(fields_to_sync)
             _eval_js(editor, js)
 
-        # Synchroniser les tags dans l'éditeur si modifiés
-        tags_to_sync = diff.tags if (hasattr(diff, "tags") and diff.tags is not None) else []
-        sync_tags_to_editor(editor, tags_to_sync)
+        # Synchroniser les tags dans l'éditeur si demandés
+        if sync_tags:
+            tags_to_sync = diff.tags if (hasattr(diff, "tags") and diff.tags is not None) else []
+            sync_tags_to_editor(editor, tags_to_sync)
 
         # Mettre à jour la collection SQLite directement (synchrone 0.1ms, sans background Taskman spinner)
         if note and hasattr(note, "id") and note.id:

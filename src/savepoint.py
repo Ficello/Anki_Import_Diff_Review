@@ -176,6 +176,12 @@ class NoteDiff:
     def __post_init__(self):
         if not self.merged_fields:
             self.merged_fields = self.updated_fields.copy()
+            if self.action == "UPDATE" and self.original_fields:
+                from .diff import normalize_html_tags
+                for fname, orig_v in self.original_fields.items():
+                    upd_v = self.updated_fields.get(fname, "")
+                    if orig_v != upd_v and normalize_html_tags(orig_v) == normalize_html_tags(upd_v):
+                        self.merged_fields[fname] = orig_v
         if self.custom_edit_fields is None:
             self.custom_edit_fields = {}
         if not self.original_tags and self.action == "UPDATE" and not self.updated_tags:

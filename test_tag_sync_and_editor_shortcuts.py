@@ -1562,4 +1562,99 @@ def test_continue_commit_all_preserves_rejected_tags_when_checkbox_unchecked(qtb
         bi._browser_panel = None
 
 
+def test_single_field_keep_old_does_not_overwrite_other_fields_or_tags(qtbot):
+    """Cliquer sur 'Garder l'ancien' d'un seul champ (Info supp) ne doit ni écraser Verso ni écraser les tags."""
+    from src.savepoint import NoteDiff
+
+    note = MockNote(
+        2002,
+        ["Recto_new", "Verso_edited_in_editor", "Info_new"],
+        ["tag_edited_in_editor"],
+    )
+    editor = MockEditor(note)
+
+    diff = NoteDiff(
+        note_id=2002,
+        action="UPDATE",
+        model_name="Basic",
+        field_names=["Recto", "Verso", "Info supp"],
+        original_fields={"Recto": "Recto_old", "Verso": "Verso_old", "Info supp": "Info_old"},
+        updated_fields={"Recto": "Recto_new", "Verso": "Verso_new", "Info supp": "Info_new"},
+        original_tags=["tag_old"],
+        updated_tags=["tag_new"],
+        tags=["tag_new"],
+    )
+
+    bi.set_pending_diffs([diff], lambda x: None)
+
+    class FakeBrowser(QtWidgets.QMainWindow):
+        def __init__(self):
+            super().__init__()
+            self.table = QtWidgets.QTableView(self)
+            self.editor = editor
+
+        def selected_notes(self):
+            return [2002]
+
+    browser = FakeBrowser()
+    qtbot.addWidget(browser)
+
+    try:
+        panel = DiffBrowserPanel(browser)
+        bi._browser_panel = panel
+        panel.select_note(2002)
+        note_panel = panel._note_panels[2002]
+        note_panel.set_editor(editor)
+
+        # Simuler une modification manuelle dans l'éditeur (Verso + tags) après ouverture de la note
+        note.fields[1] = "Verso_edited_in_editor"
+        note.tags = ["tag_edited_in_editor"]
+
+        # Cliquer sur "Garder l'ancien" uniquement pour le champ "Info supp"
+        fp_info = note_panel._field_panels["Info supp"]
+        fp_info._reject_all()
+
+        # Attendre le timer de debounce (30 ms)
+        qtbot.wait(80)
+
+        # Info supp a bien retrouvé sa valeur d'origine
+        assert note.fields[2] == "Info_old"
+        assert diff.merged_fields["Info supp"] == "Info_old"
+        # Verso et les tags de l'éditeur ne doivent PAS avoir été écrasés
+        assert note.fields[1] == "Verso_edited_in_editor"
+        assert note.tags == ["tag_edited_in_editor"]
+    finally:
+        bi.clear_pending_diffs()
+        bi._browser_panel = None
+
+
+def test_sync_editor_from_hunks_ignores_mismatched_note():
+    """sync_editor_from_hunks ne doit jamais écrire dans une note de l'éditeur d'un autre ID."""
+    from src.savepoint import NoteDiff
+    from src.editor_sync import sync_editor_from_hunks
+
+    note_b = MockNote(3002, ["B_front", "B_back"], ["B_tag"])
+    editor = MockEditor(note_b)
+
+    diff_a = NoteDiff(
+        note_id=3001,
+        action="UPDATE",
+        model_name="Basic",
+        field_names=["Front", "Back"],
+        original_fields={"Front": "A_front_old", "Back": "A_back_old"},
+        updated_fields={"Front": "A_front_new", "Back": "A_back_new"},
+        original_tags=["A_tag_old"],
+        updated_tags=["A_tag_new"],
+        tags=["A_tag_old"],
+    )
+
+    with patch("src.editor_sync._eval_js") as mock_eval:
+        sync_editor_from_hunks(editor, diff_a)
+        assert not mock_eval.called
+
+    assert note_b.fields == ["B_front", "B_back"]
+    assert note_b.tags == ["B_tag"]
+
+
+
 

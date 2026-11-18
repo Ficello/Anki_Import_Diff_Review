@@ -2421,6 +2421,7 @@ class DiffBrowserPanel(QtWidgets.QWidget):
                             tags=target_note.tags,
                         )
                         _sync_editor_with_note(getattr(self._browser, "editor", None), target_note, fields)
+                        _refresh_reviewer_if_showing(note_id)
                         if hasattr(self._browser, "on_notes_changed"):
                             self._browser.on_notes_changed()
                         label = "Version restaurée avec succès" if len(fields) > 1 else f"Champ restauré avec succès"
@@ -2461,7 +2462,7 @@ class DiffBrowserPanel(QtWidgets.QWidget):
                         ed_note[fname] = new_val
                         if hasattr(editor, "loadNote"):
                             editor.loadNote()
-        panel._sync_all_merged_then_editor()
+        panel._sync_all_merged_then_editor(full=True)
 
     def _on_history_fields_protected(self, note_id: int, fields: dict) -> None:
         panel = self._note_panels.get(note_id)
@@ -3137,6 +3138,8 @@ class NoteDiffPanelWithSync(QtWidgets.QScrollArea):
         self._browser_panel = browser_panel
         self._editor = None
         self._field_panels: Dict[str, FieldDiffPanel] = {}
+        self._dirty_fields: Set[str] = set()
+        self._full_sync_requested: bool = False
         self._sync_pending = False   # debounce : un sync est déjà programmé
         self._sync_timer = QtCore.QTimer(self)
         self._sync_timer.setSingleShot(True)
@@ -3382,28 +3385,58 @@ class NoteDiffPanelWithSync(QtWidgets.QScrollArea):
                 return
         self._editor = None
 
-    def _sync_all_merged_then_editor(self) -> None:
+    def _sync_all_merged_then_editor(self, full: bool = False) -> None:
         """Programme une sync débouncée vers l'éditeur (30 ms max de délai).
         Plusieurs appels rapprochés seront fusionnés en un seul."""
+        if full:
+            self._full_sync_requested = True
         if not self._sync_timer.isActive():
             self._sync_timer.start()
 
     def _do_sync_editor(self) -> None:
         """Exécute la synchronisation effective (appelé par le timer)."""
-        for fname, fp in self._field_panels.items():
+        if self._sync_timer.isActive():
+            self._sync_timer.stop()
+
+        dirty = set(self._dirty_fields)
+        full_sync = self._full_sync_requested or not dirty
+        self._dirty_fields.clear()
+        self._full_sync_requested = False
+
+        target_fnames = self._field_panels.keys() if full_sync else dirty
+        for fname in target_fnames:
+            fp = self._field_panels.get(fname)
+            if fp is None:
+                continue
             if fname in self._diff.custom_edit_fields:
                 self._diff.merged_fields[fname] = self._diff.custom_edit_fields[fname]
             else:
                 self._diff.merged_fields[fname] = fp.get_merged_value()
-        editor = self._browser_panel.get_editor_for_note(self._diff.note_id) or getattr(self, "_editor", None)
+
+        editor = self._browser_panel.get_editor_for_note(self._diff.note_id)
+        if not editor:
+            fallback_ed = getattr(self, "_editor", None)
+            if fallback_ed is not None:
+                ed_note = _get_editor_note(fallback_ed)
+                ed_nid = getattr(ed_note, "id", None) if ed_note is not None else getattr(fallback_ed, "nid", None)
+                valid_ids = {self._diff.note_id}
+                if getattr(self._diff, "staged_note_id", 0):
+                    valid_ids.add(self._diff.staged_note_id)
+                if ed_nid in valid_ids:
+                    editor = fallback_ed
+
         if editor:
             self._editor = editor
-            sync_editor_from_hunks(editor, self._diff)
+            if full_sync:
+                sync_editor_from_hunks(editor, self._diff)
+            else:
+                sync_editor_from_hunks(editor, self._diff, only_fields=dirty, sync_tags=False)
 
     def _on_field_hunk_changed(self, field_name: str, fp: FieldDiffPanel) -> None:
         """Appele quand un hunk est accepte/rejete dans un champ."""
         if all(h.accepted for h in fp.hunks):
             self._diff.custom_edit_fields.pop(field_name, None)
+        self._dirty_fields.add(field_name)
         self._sync_all_merged_then_editor()
         self._update_fields_visibility()
         self._browser_panel._update_status()
@@ -3450,6 +3483,7 @@ class NoteDiffPanelWithSync(QtWidgets.QScrollArea):
         if hasattr(self, "_tags_panel") and self._tags_panel:
             self._tags_panel.refresh()
 
+        self._full_sync_requested = True
         self._do_sync_editor()
         self._browser_panel._update_status()
 
@@ -3503,6 +3537,7 @@ class NoteDiffPanelWithSync(QtWidgets.QScrollArea):
         if hasattr(self, "_tags_panel") and self._tags_panel:
             self._tags_panel.refresh()
 
+        self._full_sync_requested = True
         self._do_sync_editor()
         self._browser_panel._update_status()
 
@@ -4559,7 +4594,7 @@ def prompt_diff_close_decision(parent=None) -> str:
 
 def _on_browser_menus_did_init(browser) -> None:
     """Ajoute l'option d'historique dans les menus du browser."""
-    action = QtGui.QAction("Historique & AnkiCollab...", browser)
+    action = QtGui.QAction("Historique...", browser)
     action.triggered.connect(lambda: _show_standalone_history(browser))
     if hasattr(browser, "form") and hasattr(browser.form, "menu_Cards"):
         browser.form.menu_Cards.addAction(action)
@@ -4659,8 +4694,33 @@ def _on_browser_will_show_context_menu(browser, menu) -> None:
                 if "Bulk suggest" in txt or ("AnkiCollab" in txt and "Historique" not in txt):
                     act.setToolTip("Une importation AnkiCollab est en cours de révision. Confirmez l'importation avant de suggérer.")
 
-    action = menu.addAction("Historique & AnkiCollab...")
+    action = menu.addAction("Historique...")
     action.triggered.connect(lambda: _show_standalone_history(browser))
+
+
+def _refresh_reviewer_if_showing(nid: int) -> None:
+    """Redessine la carte affichée dans le reviewer sans réinitialiser la session de révision."""
+    mw = aqt.mw
+    if (
+        mw
+        and getattr(mw, "state", None) == "review"
+        and mw.reviewer
+        and mw.reviewer.card
+        and mw.reviewer.card.nid == nid
+    ):
+        try:
+            # _redraw_current_card recharge la carte et réaffiche le recto ou verso courant
+            # sans passer par Reviewer.show() qui réinitialise les files et raccourcis.
+            if hasattr(mw.reviewer, "_redraw_current_card"):
+                mw.reviewer._redraw_current_card()
+            else:
+                mw.reviewer.card.load()
+                if getattr(mw.reviewer, "state", "question") == "answer":
+                    mw.reviewer._showAnswer()
+                else:
+                    mw.reviewer._showQuestion()
+        except Exception:
+            pass
 
 
 def _show_standalone_history(browser) -> None:
@@ -4683,7 +4743,7 @@ def _show_standalone_history(browser) -> None:
     # Créer le dialogue
     from .ui import _get_style_base
     dialog = QtWidgets.QDialog(browser)
-    dialog.setWindowTitle(f"Historique & AnkiCollab — Note {nid}")
+    dialog.setWindowTitle(f"Historique — Note {nid}")
     dialog.resize(850, 500)
     dialog.setStyleSheet(_get_style_base())
     
@@ -4714,13 +4774,7 @@ def _show_standalone_history(browser) -> None:
                 pass
 
             # Si le reviewer affiche cette carte, la recharger
-            mw = aqt.mw
-            if mw and mw.reviewer and mw.reviewer.card and mw.reviewer.card.nid == current_nid:
-                try:
-                    mw.reviewer.card.load()
-                    mw.reviewer.show()
-                except Exception:
-                    pass
+            _refresh_reviewer_if_showing(current_nid)
             
             # Enregistrer le snapshot de restauration complet
             from .history import NoteHistoryDB
@@ -4796,7 +4850,7 @@ def _show_reviewer_history() -> None:
     # Créer le dialogue
     from .ui import _get_style_base
     dialog = QtWidgets.QDialog(mw)
-    dialog.setWindowTitle(f"Historique & AnkiCollab — Note {nid}")
+    dialog.setWindowTitle(f"Historique — Note {nid}")
     dialog.resize(850, 500)
     dialog.setStyleSheet(_get_style_base())
     
@@ -4819,12 +4873,7 @@ def _show_reviewer_history() -> None:
             mw.col.update_note(target_note)
             
             # Recharger le reviewer
-            if mw.reviewer and mw.reviewer.card and mw.reviewer.card.nid == current_nid:
-                try:
-                    mw.reviewer.card.load()
-                    mw.reviewer.show()
-                except Exception:
-                    pass
+            _refresh_reviewer_if_showing(current_nid)
 
             # Si le browser est ouvert et affiche cette note, le recharger
             if hasattr(mw, "browser") and mw.browser:
@@ -4863,12 +4912,7 @@ def _show_reviewer_history() -> None:
                 mw.col.update_note(target_note)
                 
                 # Recharger le reviewer
-                if mw.reviewer and mw.reviewer.card and mw.reviewer.card.nid == current_nid:
-                    try:
-                        mw.reviewer.card.load()
-                        mw.reviewer.show()
-                    except Exception:
-                        pass
+                _refresh_reviewer_if_showing(current_nid)
 
                 # Si le browser est ouvert et affiche cette note, le recharger
                 if hasattr(mw, "browser") and mw.browser:
@@ -4954,7 +4998,7 @@ def _show_editor_history(editor: Any) -> None:
 
     from .ui import _get_style_base
     dialog = QtWidgets.QDialog(getattr(editor, "parentWindow", None) or mw)
-    dialog.setWindowTitle(f"Historique & AnkiCollab — Note {nid}")
+    dialog.setWindowTitle(f"Historique — Note {nid}")
     dialog.resize(850, 500)
     dialog.setStyleSheet(_get_style_base())
     
@@ -4980,12 +5024,7 @@ def _show_editor_history(editor: Any) -> None:
             _sync_editor_with_note(editor, target_note, fields)
 
             # Si le reviewer affiche cette carte, la recharger
-            if mw.reviewer and mw.reviewer.card and mw.reviewer.card.nid == current_nid:
-                try:
-                    mw.reviewer.card.load()
-                    mw.reviewer.show()
-                except Exception:
-                    pass
+            _refresh_reviewer_if_showing(current_nid)
             
             # Enregistrer le snapshot de restauration complet
             from .history import NoteHistoryDB
@@ -5027,12 +5066,7 @@ def _show_editor_history(editor: Any) -> None:
                     pass
                 
                 # Si le reviewer affiche cette carte, la recharger
-                if mw.reviewer and mw.reviewer.card and mw.reviewer.card.nid == current_nid:
-                    try:
-                        mw.reviewer.card.load()
-                        mw.reviewer.show()
-                    except Exception:
-                        pass
+                _refresh_reviewer_if_showing(current_nid)
                 
                 aqt.utils.tooltip("Protection des champs enregistrée sur la note")
         except Exception as e:
@@ -5050,7 +5084,7 @@ def _on_editor_did_init_buttons(buttons: List[Any], editor: Any) -> None:
         icon=None,
         cmd="diff_history_cmd",
         func=lambda e=editor: _show_editor_history(e),
-        tip="Historique & AnkiCollab de la note",
+        tip="Historique de la note",
         label="Historique",
     )
     buttons.append(btn)

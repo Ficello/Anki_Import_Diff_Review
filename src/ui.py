@@ -1530,6 +1530,8 @@ class FieldDiffPanel(QtWidgets.QFrame, PaletteMixin):
         if self.hunks and any(h.accepted for h in self.hunks) and not all(h.accepted for h in self.hunks):
             from .diff import apply_hunks
             return apply_hunks(self.old_mod, self.prop_mod, self.hunks)
+        if not self.hunks and self.old_mod == self.old_orig and self.prop_mod == self.prop_orig:
+            return self.old_orig
         if self.active_target == "OLD":
             return self.old_mod
         return self.prop_mod

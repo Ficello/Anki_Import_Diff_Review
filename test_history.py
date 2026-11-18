@@ -577,3 +577,179 @@ def test_sync_editor_with_note_updates_in_memory_note():
     _sync_editor_with_note(editor, target_note, {"Recto": "Ancien"})
     assert editor.note["Recto"] == "Ancien"
     assert editor.loaded is True
+
+
+def test_scan_backups_cache_and_mod_skip(tmp_path, monkeypatch):
+    """Vérifie le cache persistant backup_scans, le saut par b_mod et l'annulation."""
+    import sqlite3
+    import threading
+    from datetime import datetime
+    import anki._backend
+    from anki_import_diff.src.history import NoteHistoryDB
+
+    db = NoteHistoryDB(str(tmp_path / "hist.db"))
+    backup_dir = tmp_path / "backups"
+    backup_dir.mkdir()
+
+    # 3 sauvegardes :
+    # - 2026-11-10 : note modifiée le 2026-11-01
+    # - 2026-11-05 : entre 2026-11-01 (+1h) et 2026-11-10 -> doit être SAUTÉE sans décompression
+    # - 2026-10-20 : antérieure au 2026-11-01 -> doit être inspectée
+    b_new = backup_dir / "backup-2026-11-10-12.00.00.colpkg"
+    b_mid = backup_dir / "backup-2026-11-05-12.00.00.colpkg"
+    b_old = backup_dir / "backup-2026-10-20-12.00.00.colpkg"
+    for p in (b_new, b_mid, b_old):
+        p.write_bytes(b"fake")
+
+    mod_nov01 = int(datetime(2026, 11, 1, 10, 0, 0).timestamp())
+    mod_oct15 = int(datetime(2026, 10, 15, 10, 0, 0).timestamp())
+
+    imported_calls = []
+
+    class FakeBackend:
+        def import_collection_package(self, col_path, backup_path, media_folder, media_db):
+            imported_calls.append(os.path.basename(backup_path))
+            c = sqlite3.connect(col_path)
+            c.execute("CREATE TABLE IF NOT EXISTS notes (id INTEGER PRIMARY KEY, mid INTEGER, mod INTEGER, flds TEXT, tags TEXT)")
+            c.execute("CREATE TABLE IF NOT EXISTS fields (ntid INTEGER, ord INTEGER, name TEXT)")
+            c.execute("DELETE FROM notes")
+            c.execute("DELETE FROM fields")
+            c.execute("INSERT INTO fields VALUES (1, 0, 'Recto')")
+            if "2026-11-10" in backup_path:
+                c.execute("INSERT INTO notes VALUES (999, 1, ?, 'Version Nov', 't1')", (mod_nov01,))
+            elif "2026-10-20" in backup_path:
+                c.execute("INSERT INTO notes VALUES (999, 1, ?, 'Version Oct', 't1')", (mod_oct15,))
+            else:
+                raise AssertionError(f"Sauvegarde intermédiaire non sautée: {backup_path}")
+            c.commit()
+            c.close()
+
+    monkeypatch.setattr(anki._backend, "RustBackend", FakeBackend)
+
+    progress_events = []
+    versions = db.scan_backups_for_note(
+        999,
+        progress_callback=lambda curr, tot, found: progress_events.append((curr, tot, found)),
+    )
+
+    assert len(versions) == 2
+    # b_mid a été sautée grâce à b_mod
+    assert imported_calls == [
+        "backup-2026-11-10-12.00.00.colpkg",
+        "backup-2026-10-20-12.00.00.colpkg",
+    ]
+    assert progress_events == [(1, 3, 1), (2, 3, 1), (3, 3, 2)]
+
+    # 2e appel : tout est en cache, 0 décompression
+    imported_calls.clear()
+    versions2 = db.scan_backups_for_note(999)
+    assert len(versions2) == 2
+    assert imported_calls == []
+
+    # Test annulation immédiate sur une autre note
+    cancel_ev = threading.Event()
+    cancel_ev.set()
+    versions3 = db.scan_backups_for_note(888, cancel_event=cancel_ev)
+    assert versions3 == []
+    assert imported_calls == []
+    db.close()
+
+
+def test_history_panel_live_streaming_preserves_selection(qtbot, tmp_db, monkeypatch):
+    """Vérifie que le scan démarre automatiquement sans boutons et rafraîchit la liste en continu."""
+    from PyQt6 import QtWidgets
+    from anki_import_diff.src.ankicollab_panel import AnkiCollabHistoryPanel
+    from anki_import_diff.src.history import NoteHistoryDB
+
+    NoteHistoryDB._instance = tmp_db
+    scan_calls = []
+
+    def fake_scan(note_id, progress_callback=None, cancel_event=None):
+        scan_calls.append(note_id)
+        return tmp_db.get_history(note_id)
+
+    monkeypatch.setattr(tmp_db, "scan_backups_for_note", fake_scan)
+
+    tmp_db.store_snapshot(555, {"Recto": "V2"}, source="import", comment="V2")
+    panel = AnkiCollabHistoryPanel(
+        note_id=555,
+        field_names=["Recto"],
+        current_fields={"Recto": "V2"},
+    )
+    qtbot.addWidget(panel)
+
+    # Les boutons "Rechercher dans les sauvegardes Anki" et "Actualiser" ont été retirés
+    assert not hasattr(panel, "_btn_scan_backups")
+    btn_texts = [b.text() for b in panel.findChildren(QtWidgets.QPushButton)]
+    assert "Rechercher dans les sauvegardes Anki" not in btn_texts
+    assert "Actualiser" not in btn_texts
+
+    # Le scan automatique a démarré pour la note 555
+    qtbot.waitUntil(lambda: 555 in scan_calls and not panel._is_scanning_backups, timeout=2000)
+
+    assert panel._list.count() == 1
+    v2_id = panel._selected_delta.version.version_id
+
+    # Simuler l'insertion d'une version antérieure pendant le scan
+    tmp_db.store_snapshot(555, {"Recto": "V1"}, source="backup", comment="Backup V1")
+    panel._on_scan_progress(555, 2, 10, 1, True)
+
+    assert panel._list.count() == 2
+    assert "Recherche (2/10)... 1 version(s) trouvée(s)" in panel._scan_status_lbl.text()
+    # La sélection reste sur V2
+    assert panel._selected_delta is not None
+    assert panel._selected_delta.version.version_id == v2_id
+
+    panel._on_scan_finished(555, 1, False)
+    assert "Sauvegardes indexées (1 nouvelle(s) version(s))." in panel._scan_status_lbl.text()
+
+    # Changer de note relance le scan automatiquement
+    tmp_db.store_snapshot(556, {"Recto": "Autre"}, source="import", comment="Autre")
+    panel.set_note(556, ["Recto"], {"Recto": "Autre"})
+    qtbot.waitUntil(lambda: 556 in scan_calls and not panel._is_scanning_backups, timeout=2000)
+
+
+def test_refresh_reviewer_if_showing_uses_redraw_not_show(monkeypatch):
+    """Vérifie que _refresh_reviewer_if_showing redessine sans appeler reviewer.show()."""
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+    import aqt
+    from anki_import_diff.src.browser_integration import _refresh_reviewer_if_showing
+
+    reviewer = MagicMock()
+    reviewer.card = SimpleNamespace(nid=42, load=MagicMock())
+    fake_mw = SimpleNamespace(state="review", reviewer=reviewer)
+    monkeypatch.setattr(aqt, "mw", fake_mw)
+
+    _refresh_reviewer_if_showing(42)
+    reviewer._redraw_current_card.assert_called_once()
+    reviewer.show.assert_not_called()
+
+    # Ne doit rien faire si la note ne correspond pas
+    reviewer.reset_mock()
+    _refresh_reviewer_if_showing(99)
+    reviewer._redraw_current_card.assert_not_called()
+    reviewer.show.assert_not_called()
+
+    # Ne doit rien faire hors état "review"
+    reviewer.reset_mock()
+    fake_mw.state = "overview"
+    _refresh_reviewer_if_showing(42)
+    reviewer._redraw_current_card.assert_not_called()
+    reviewer.show.assert_not_called()
+
+    # Fallback si _redraw_current_card est absent (question / answer)
+    fallback_reviewer = SimpleNamespace(
+        card=SimpleNamespace(nid=42, load=MagicMock()),
+        state="answer",
+        _showAnswer=MagicMock(),
+        _showQuestion=MagicMock(),
+        show=MagicMock(),
+    )
+    fake_mw.state = "review"
+    fake_mw.reviewer = fallback_reviewer
+    _refresh_reviewer_if_showing(42)
+    fallback_reviewer.card.load.assert_called_once()
+    fallback_reviewer._showAnswer.assert_called_once()
+    fallback_reviewer._showQuestion.assert_not_called()
+    fallback_reviewer.show.assert_not_called()

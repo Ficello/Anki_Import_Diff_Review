@@ -625,7 +625,7 @@ class AnkiCollabHistoryPanel(QtWidgets.QWidget):
       - Liste gauche : Versions chronologiques (vN..v1) sans saturation de micro-frappes.
       - Panneau droit : Mode de comparaison des champs modifies (Avant | Apres),
         permettant la restauration granulaire champ par champ ou de toute la note.
-      - Bouton de recherche dans les sauvegardes .colpkg d'Anki.
+      - Recherche automatique en arrière-plan dans les sauvegardes .colpkg d'Anki avec actualisation au fil de l'eau.
 
     Signaux :
       version_retrieved(dict) : {field_name: value} emis lors d'une restauration
@@ -636,6 +636,8 @@ class AnkiCollabHistoryPanel(QtWidgets.QWidget):
     version_retrieved = _Signal(dict)
     fields_protected = _Signal(dict)
     protection_tags_applied = _Signal(list)
+    _scan_progress_sig = _Signal(int, int, int, int, bool)
+    _scan_finished_sig = _Signal(int, int, bool)
     _instances: List[weakref.ref[AnkiCollabHistoryPanel]] = []
 
     def __init__(
@@ -658,12 +660,22 @@ class AnkiCollabHistoryPanel(QtWidgets.QWidget):
         self._filter_field: str = "ALL"
         self._render_mode: str = "diff"  # "diff", "render", "raw"
         self._is_scanning_backups = False
+        self._scan_note_id: Optional[int] = None
+        self._scan_cancel_event: Optional[threading.Event] = None
+        self._status_clear_timer = QtCore.QTimer(self)
+        self._status_clear_timer.setSingleShot(True)
+        self._status_clear_timer.timeout.connect(self._clear_scan_status_if_idle)
+
+        self._scan_progress_sig.connect(self._on_scan_progress)
+        self._scan_finished_sig.connect(self._on_scan_finished)
+        self.destroyed.connect(self._cancel_active_scan)
 
         AnkiCollabHistoryPanel._instances = [ref for ref in AnkiCollabHistoryPanel._instances if ref() is not None]
         AnkiCollabHistoryPanel._instances.append(weakref.ref(self))
 
         self._build_ui()
         self._load_data()
+        self._start_backup_scan()
 
     # ── Construction de l'UI ─────────────────────────────────────────────
 
@@ -708,30 +720,6 @@ class AnkiCollabHistoryPanel(QtWidgets.QWidget):
             f"color: {c['text_secondary']}; font-size: 11px; background: transparent;"
         )
         hl.addWidget(self._scan_status_lbl)
-
-        # Bouton Rechercher dans les sauvegardes Anki
-        self._btn_scan_backups = QtWidgets.QPushButton("Rechercher dans les sauvegardes Anki")
-        self._btn_scan_backups.setFixedHeight(26)
-        self._btn_scan_backups.setCursor(QtGui.QCursor(_Qt.CursorShape.PointingHandCursor))
-        self._btn_scan_backups.setStyleSheet(
-            f"QPushButton {{ background: {c['surface']}; border: 1px solid {c['border']}; "
-            f"border-radius: 3px; color: {c['text_primary']}; font-size: 11px; padding: 2px 10px; }}"
-            f"QPushButton:hover {{ background: {c['surface_hover']}; border-color: {c['accent']}; }}"
-        )
-        self._btn_scan_backups.clicked.connect(self._on_scan_backups)
-        hl.addWidget(self._btn_scan_backups)
-
-        # Bouton Actualiser
-        refresh_btn = QtWidgets.QPushButton("Actualiser")
-        refresh_btn.setFixedHeight(26)
-        refresh_btn.setCursor(QtGui.QCursor(_Qt.CursorShape.PointingHandCursor))
-        refresh_btn.setStyleSheet(
-            f"QPushButton {{ background: transparent; border: 1px solid {c['border']}; "
-            f"border-radius: 3px; color: {c['text_secondary']}; font-size: 11px; padding: 2px 8px; }}"
-            f"QPushButton:hover {{ color: {c['text_primary']}; background: {c['sel']}; }}"
-        )
-        refresh_btn.clicked.connect(self._load_data)
-        hl.addWidget(refresh_btn)
 
         root.addWidget(header)
 
@@ -866,15 +854,19 @@ class AnkiCollabHistoryPanel(QtWidgets.QWidget):
 
     # ── Chargement des donnees ───────────────────────────────────────────
 
-    def _load_data(self):
+    def _load_data(self, preserve_selection: bool = False):
         """Charge l'historique et calcule les deltas de comparaison."""
+        prev_vid = None
+        if preserve_selection and self._selected_delta is not None:
+            prev_vid = self._selected_delta.version.version_id
+
         self._history_deltas = self._history_db.get_history_with_deltas(
             self._note_id,
             current_fields=self._current_fields,
         )
         ver_count = len(self._history_deltas)
         self._note_info_lbl.setText(f"Note #{self._note_id} · {ver_count} version{'s' if ver_count > 1 else ''}")
-        self._populate_list()
+        self._populate_list(select_version_id=prev_vid)
 
     def _populate_filter_combo(self):
         self._field_filter_combo.blockSignals(True)
@@ -886,7 +878,7 @@ class AnkiCollabHistoryPanel(QtWidgets.QWidget):
         self._field_filter_combo.addItem("Tags uniquement", "__tags__")
         self._field_filter_combo.blockSignals(False)
 
-    def _populate_list(self):
+    def _populate_list(self, select_version_id: Optional[str] = None):
         self._list.blockSignals(True)
         self._list.clear()
 
@@ -896,14 +888,18 @@ class AnkiCollabHistoryPanel(QtWidgets.QWidget):
             empty.setForeground(QtGui.QColor(str(_CLR_SUBTEXT)))
             self._list.addItem(empty)
             self._list.blockSignals(False)
+            self._selected_delta = None
             self._render_comparison_view()
             return
 
+        target_row = 0
         for idx, delta in enumerate(self._history_deltas):
             item = QtWidgets.QListWidgetItem()
             item.setData(_Qt.ItemDataRole.UserRole, delta)
 
             v_entry = delta.version
+            if select_version_id and v_entry.version_id == select_version_id:
+                target_row = idx
             v_label = f"v{delta.version_number}"
             src_tag = v_entry.source_icon
             date_str = v_entry.timestamp_str
@@ -931,7 +927,7 @@ class AnkiCollabHistoryPanel(QtWidgets.QWidget):
             self._list.addItem(item)
 
         self._list.blockSignals(False)
-        self._list.setCurrentRow(0)
+        self._list.setCurrentRow(target_row)
 
     # ── Selection & Affichage de comparaison ─────────────────────────────
 
@@ -1119,35 +1115,72 @@ class AnkiCollabHistoryPanel(QtWidgets.QWidget):
 
     # ── Exploration des sauvegardes .colpkg Anki ─────────────────────────
 
-    def _on_scan_backups(self):
+    def _cancel_active_scan(self):
+        if self._scan_cancel_event is not None:
+            self._scan_cancel_event.set()
+
+    def _clear_scan_status_if_idle(self):
+        if not self._is_scanning_backups:
+            self._scan_status_lbl.setText("")
+
+    def _start_backup_scan(self):
+        note_id = self._note_id
         if self._is_scanning_backups:
-            return
+            if self._scan_note_id == note_id:
+                return
+            self._cancel_active_scan()
+
+        self._status_clear_timer.stop()
         self._is_scanning_backups = True
-        self._btn_scan_backups.setEnabled(False)
+        self._scan_note_id = note_id
+        cancel_ev = threading.Event()
+        self._scan_cancel_event = cancel_ev
         self._scan_status_lbl.setText("Recherche dans les sauvegardes Anki...")
 
-        note_id = self._note_id
+        last_found = [0]
 
         def _bg_scan():
             def _progress(curr, tot, found):
-                msg = f"Recherche ({curr}/{tot})... {found} version(s) trouvée(s)"
-                QtCore.QTimer.singleShot(0, lambda: self._scan_status_lbl.setText(msg))
+                if cancel_ev.is_set():
+                    return
+                has_new = found > last_found[0]
+                last_found[0] = found
+                self._scan_progress_sig.emit(note_id, curr, tot, found, has_new)
 
             try:
-                self._history_db.scan_backups_for_note(note_id, progress_callback=_progress)
+                self._history_db.scan_backups_for_note(
+                    note_id,
+                    progress_callback=_progress,
+                    cancel_event=cancel_ev,
+                )
             except Exception as e:
                 print(f"[anki-diff] Error scanning backups: {e}")
 
-            QtCore.QTimer.singleShot(0, _on_done)
-
-        def _on_done():
-            self._is_scanning_backups = False
-            self._btn_scan_backups.setEnabled(True)
-            self._scan_status_lbl.setText("Sauvegardes indexées.")
-            QtCore.QTimer.singleShot(3000, lambda: self._scan_status_lbl.setText(""))
-            self._load_data()
+            self._scan_finished_sig.emit(note_id, last_found[0], cancel_ev.is_set())
 
         threading.Thread(target=_bg_scan, daemon=True).start()
+
+    def _on_scan_progress(self, note_id: int, curr: int, tot: int, found: int, has_new: bool):
+        if note_id != self._note_id:
+            return
+        self._scan_status_lbl.setText(f"Recherche ({curr}/{tot})... {found} version(s) trouvée(s)")
+        if has_new:
+            self._load_data(preserve_selection=True)
+
+    def _on_scan_finished(self, note_id: int, found: int, cancelled: bool):
+        if note_id != self._note_id:
+            return
+        self._is_scanning_backups = False
+        self._scan_note_id = None
+        self._scan_cancel_event = None
+        if cancelled:
+            self._scan_status_lbl.setText(f"Recherche arrêtée ({found} version(s) trouvée(s)).")
+        elif found > 0:
+            self._scan_status_lbl.setText(f"Sauvegardes indexées ({found} nouvelle(s) version(s)).")
+        else:
+            self._scan_status_lbl.setText("Sauvegardes à jour.")
+        self._status_clear_timer.start(3000)
+        self._load_data(preserve_selection=True)
 
     # ── API publique de synchronisation ──────────────────────────────────
 
@@ -1155,16 +1188,19 @@ class AnkiCollabHistoryPanel(QtWidgets.QWidget):
                  current_fields: Optional[Dict[str, str]] = None) -> None:
         """Change la note affichee."""
         is_same = (note_id == self._note_id)
+        if not is_same and self._is_scanning_backups:
+            self._cancel_active_scan()
         self._note_id = note_id
         self._field_names = field_names
         self._current_fields = current_fields or {}
 
         if is_same:
-            self._render_comparison_view()
+            self._load_data(preserve_selection=True)
             return
 
         self._populate_filter_combo()
         self._load_data()
+        self._start_backup_scan()
 
     def update_to_note(self, note_id: int, field_names: List[str],
                        current_fields: Optional[Dict[str, str]] = None) -> None:

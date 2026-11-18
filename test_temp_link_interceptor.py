@@ -68,6 +68,21 @@ def test_remove_dead_link_from_html():
     cleaned2 = remove_dead_link_from_html(html2, dead_nid)
     assert cleaned2 == ""
 
+    # Badge sanitisé AnkiCollab (sans data-nid, NID dans span.edn-nid) + autre badge conservé
+    keep_nid = 1669544461685
+    html3 = (
+        f'<span class="edn-desc">Gardé</span>&nbsp;—&nbsp;'
+        f'<kbd class="clickable_cards"><span class="edn-nid">{keep_nid}</span></kbd><br>'
+        f'<span class="edn-desc">Supprimé</span>&nbsp;—&nbsp;'
+        f'<kbd class="clickable_cards"><span class="edn-nid">{dead_nid}</span></kbd><br>Fin'
+    )
+    cleaned3 = remove_dead_link_from_html(html3, dead_nid)
+    assert str(dead_nid) not in cleaned3
+    assert str(keep_nid) in cleaned3
+    assert "Gardé" in cleaned3
+    assert "Supprimé" not in cleaned3
+    assert "Fin" in cleaned3
+
 
 class MockNote:
     def __init__(self, id, fields):

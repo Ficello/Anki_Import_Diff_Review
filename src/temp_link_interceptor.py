@@ -84,12 +84,23 @@ def remove_dead_link_from_html(html_text: str, dead_nid: int) -> str:
     if s_dead not in html_text:
         return html_text
 
-    # 1. Supprimer le bloc complet <span class="edn-desc">...</span>&nbsp;—&nbsp;<kbd ... data-nid="dead_nid">...</kbd>
-    pattern_full = rf'(?:<br\s*/?>\s*)?<span\s+[^>]*class=[\"\']edn-desc[\"\'][^>]*>.*?</span>(?:&nbsp;|\s)*[—–-](?:&nbsp;|\s)*<kbd\s+[^>]*data-nid=[\"\']{re.escape(s_dead)}[\"\'][^>]*>.*?</kbd>'
+    esc_dead = re.escape(s_dead)
+    kbd_dead_pat = (
+        rf'(?:'
+        rf'<kbd\b[^>]*\bdata-nid=["\']{esc_dead}["\'][^>]*>(?:(?!</?kbd\b).)*?</kbd>'
+        rf'|'
+        rf'<kbd\b[^>]*\bclass=["\'][^"\']*\bclickable_cards\b[^"\']*["\'][^>]*>(?:(?!</?kbd\b).)*?'
+        rf'(?:<span\b[^>]*\bclass=["\'][^"\']*\bedn-nid\b[^"\']*["\'][^>]*>\s*{esc_dead}\s*</span>|{esc_dead})'
+        rf'(?:(?!</?kbd\b).)*?</kbd>'
+        rf')'
+    )
+
+    # 1. Supprimer le bloc complet <span class="edn-desc">...</span>&nbsp;—&nbsp;<kbd ...>...</kbd>
+    pattern_full = rf'(?:<br\s*/?>\s*)?<span\s+[^>]*class=[\"\']edn-desc[\"\'][^>]*>(?:(?!</?kbd\b).)*?</span>(?:&nbsp;|\s)*[—–-](?:&nbsp;|\s)*{kbd_dead_pat}'
     res = re.sub(pattern_full, '', html_text, flags=re.IGNORECASE | re.DOTALL)
 
-    # 2. Supprimer un badge <kbd ... data-nid="dead_nid">...</kbd> isolé (avec éventuel tiret devant)
-    pattern_badge = rf'(?:(?:&nbsp;|\s)*[—–-](?:&nbsp;|\s)*)?<kbd\s+[^>]*data-nid=[\"\']{re.escape(s_dead)}[\"\'][^>]*>.*?</kbd>(?:&nbsp;|\s)*(?:<br\s*/?>)?'
+    # 2. Supprimer un badge <kbd ...>...</kbd> isolé (avec éventuel tiret devant)
+    pattern_badge = rf'(?:(?:&nbsp;|\s)*[—–-](?:&nbsp;|\s)*)?{kbd_dead_pat}(?:&nbsp;|\s)*(?:<br\s*/?>)?'
     res = re.sub(pattern_badge, '', res, flags=re.IGNORECASE | re.DOTALL)
 
     # 3. Nettoyer les <br> doubles créés

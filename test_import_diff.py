@@ -1877,7 +1877,7 @@ def test_browser_context_menu_and_multiselect(qtbot):
         _on_browser_will_show_context_menu(browser, menu_nodiff)
         actions_nodiff = [a.text() for a in menu_nodiff.actions() if a.text()]
         assert not any("Diff :" in a for a in actions_nodiff)
-        assert any("Historique & AnkiCollab..." in a for a in actions_nodiff)
+        assert any("Historique..." in a for a in actions_nodiff)
 
     finally:
         bi._browser_panel = None
@@ -3098,5 +3098,85 @@ def test_field_diff_panel_cosmetic_html_marked_unchanged(mock_env):
     )
     assert fp.is_changed() is False
     assert fp._badge.text() == "Inchangé"
+
+
+def test_ankicollab_stripped_clickable_cards_attributes_ignored(mock_env):
+    """Stripping contenteditable/tabindex/data-nid on <kbd class='clickable_cards'> produces no diff."""
+    from anki_import_diff.src.diff import compute_hunks, normalize_html_tags
+    from anki_import_diff.src.ui import FieldDiffPanel
+
+    local_html = (
+        '<span class="edn-desc"><span class="edn-desc">Maladies professionnelles </span>—&nbsp;'
+        '<kbd class="clickable_cards" contenteditable="false" tabindex="0" data-nid="1669544461685">'
+        '<span class="edn-nid">1669544461685</span></kbd>&nbsp;<br>Catégories</span>&nbsp;d\'invalidités —&nbsp;'
+        '<kbd class="clickable_cards" contenteditable="false" tabindex="0" data-nid="1666776050088">'
+        '<span class="edn-nid">1666776050088</span></kbd>&nbsp;<br>'
+    )
+    collab_html = (
+        '<span class="edn-desc"><span class="edn-desc">Maladies professionnelles </span>—&nbsp;'
+        '<kbd class="clickable_cards"><span class="edn-nid">1669544461685</span></kbd>&nbsp;<br>'
+        'Catégories</span>&nbsp;d\'invalidités —&nbsp;'
+        '<kbd class="clickable_cards"><span class="edn-nid">1666776050088</span></kbd>&nbsp;<br>'
+    )
+
+    assert normalize_html_tags(local_html) == normalize_html_tags(collab_html)
+    assert compute_hunks(local_html, collab_html) == []
+
+    fp = FieldDiffPanel("Cartes liées", local_html, collab_html)
+    assert fp.is_changed() is False
+    assert fp.get_merged_value() == local_html
+
+    # Hyperlink variant with hidden span.edn-nid
+    local_hyper = (
+        'Voir <kbd class="clickable_cards" contenteditable="false" tabindex="0" data-nid="1669544461685">'
+        '<span class="edn-nid" style="display:none;font-size:0;line-height:0">1669544461685</span>ici</kbd>.'
+    )
+    collab_hyper = (
+        'Voir <kbd class="clickable_cards">'
+        '<span class="edn-nid" style="display:none;font-size:0;line-height:0">1669544461685</span>ici</kbd>.'
+    )
+    assert compute_hunks(local_hyper, collab_hyper) == []
+
+    # Mixed change: only the real text edit produces a hunk
+    mixed_collab = collab_html.replace("Catégories", "Catégories mises à jour")
+    hunks = compute_hunks(local_html, mixed_collab)
+    assert len(hunks) == 1
+    assert "clickable_cards" not in "".join(hunks[0].old_parts + hunks[0].new_parts)
+
+    # Real NID change still produces a diff even when attributes differ
+    changed_nid_collab = collab_html.replace("1669544461685", "1999999999999")
+    assert len(compute_hunks(local_html, changed_nid_collab)) >= 1
+
+    # Legacy badge without .edn-nid preserves data-nid comparison
+    legacy_a = '<kbd class="clickable_cards" data-nid="111">Lien</kbd>'
+    legacy_b = '<kbd class="clickable_cards" data-nid="222">Lien</kbd>'
+    assert len(compute_hunks(legacy_a, legacy_b)) == 1
+
+    # Savepoint capture skips notes with only badge attribute differences
+    mock_env.col.db.execute(
+        "INSERT INTO notes (id, mid, flds, tags) VALUES (2002, 1, ?, ' tag1 ')",
+        (f"Front\x1f{local_html}",),
+    )
+
+    def run_collab_attr_strip():
+        mock_env.col.db.execute(
+            "UPDATE notes SET flds=? WHERE id=2002",
+            (f"Front\x1f{collab_html}",),
+        )
+
+    assert capture_import_changes(run_collab_attr_strip) == []
+
+    # NoteDiff preserves local attributes on unchanged cosmetic fields when another field changes
+    nd = NoteDiff(
+        note_id=2003,
+        original_fields={"Front": "Ancien", "Cartes liées": local_html},
+        updated_fields={"Front": "Nouveau", "Cartes liées": collab_html},
+        model_name="Basic",
+        field_names=["Front", "Cartes liées"],
+        action="UPDATE",
+    )
+    assert nd.merged_fields["Front"] == "Nouveau"
+    assert nd.merged_fields["Cartes liées"] == local_html
+
 
 

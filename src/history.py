@@ -18,11 +18,12 @@ from __future__ import annotations
 import json
 import os
 import queue
+import re
 import sqlite3
 import threading
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 
 
@@ -263,6 +264,14 @@ class NoteHistoryDB:
                 locked_value TEXT   NOT NULL DEFAULT '',
                 locked_at   TEXT    NOT NULL,
                 PRIMARY KEY (note_id, field_name)
+            );
+
+            CREATE TABLE IF NOT EXISTS backup_scans (
+                note_id      INTEGER NOT NULL,
+                backup_name  TEXT    NOT NULL,
+                backup_mtime REAL    NOT NULL,
+                backup_size  INTEGER NOT NULL,
+                PRIMARY KEY (note_id, backup_name)
             );
         """)
         conn.commit()
@@ -626,15 +635,37 @@ class NoteHistoryDB:
             conn.commit()
         return len(to_delete)
 
+    @staticmethod
+    def _parse_backup_timestamp(backup_path: str) -> Optional[float]:
+        """Extrait le timestamp Unix d'un fichier backup-YYYY-MM-DD-HH.MM.SS.colpkg."""
+        bname = os.path.basename(backup_path)
+        m = re.search(r"(\d{4})-(\d{2})-(\d{2})-(\d{2})\.(\d{2})\.(\d{2})", bname)
+        if m:
+            try:
+                dt = datetime(
+                    int(m.group(1)), int(m.group(2)), int(m.group(3)),
+                    int(m.group(4)), int(m.group(5)), int(m.group(6)),
+                )
+                return dt.timestamp()
+            except Exception:
+                pass
+        try:
+            return os.path.getmtime(backup_path)
+        except Exception:
+            return None
+
     def scan_backups_for_note(
         self,
         note_id: int,
         progress_callback: Optional[Callable[[int, int, int], None]] = None,
+        cancel_event: Optional[threading.Event] = None,
     ) -> List[VersionEntry]:
         """
         Explore les sauvegardes automatiques (.colpkg) d'Anki pour extraire
         toutes les versions antérieures distinctes de la note.
         Insère les versions trouvées dans note_versions avec source='backup'.
+        Utilise un cache persistant (backup_scans) et l'horodatage `mod` de la note
+        pour sauter les sauvegardes redondantes sans les décompresser.
         Retourne la liste complète à jour de toutes les versions de la note.
         """
         mw = _get_mw()
@@ -667,17 +698,31 @@ class NoteHistoryDB:
         import tempfile
         import shutil
 
-        # Récupérer les empreintes déjà connues en base
+        # Récupérer les empreintes déjà connues en base et le cache des sauvegardes déjà scannées
         conn = self._conn()
         existing_jsons = set(
             r["fields_json"] for r in conn.execute(
                 "SELECT fields_json FROM note_versions WHERE note_id = ?", (note_id,)
             ).fetchall()
         )
+        scanned_cache = {
+            r["backup_name"]: (r["backup_mtime"], r["backup_size"])
+            for r in conn.execute(
+                "SELECT backup_name, backup_mtime, backup_size FROM backup_scans WHERE note_id = ?",
+                (note_id,),
+            ).fetchall()
+        }
 
         tmp_dir = tempfile.mkdtemp(prefix="anki_diff_backup_scan_")
         found_count = 0
         total = len(backups)
+
+        def _notify(curr_idx: int) -> None:
+            if progress_callback:
+                try:
+                    progress_callback(curr_idx, total, found_count)
+                except Exception:
+                    pass
 
         try:
             media_dir = os.path.join(tmp_dir, "media")
@@ -686,13 +731,40 @@ class NoteHistoryDB:
             col_path = os.path.join(tmp_dir, "temp_col.anki2")
 
             last_seen_mod = None
+            skip_until_mod: Optional[int] = None
 
             for idx, bp in enumerate(backups):
-                if progress_callback:
-                    try:
-                        progress_callback(idx + 1, total, found_count)
-                    except Exception:
-                        pass
+                if cancel_event is not None and cancel_event.is_set():
+                    break
+
+                bname = os.path.basename(bp)
+                try:
+                    st = os.stat(bp)
+                    bmtime, bsize = st.st_mtime, st.st_size
+                except OSError:
+                    _notify(idx + 1)
+                    continue
+
+                # 1. Cache persistant : sauvegarde déjà inspectée pour cette note
+                if scanned_cache.get(bname) == (bmtime, bsize):
+                    _notify(idx + 1)
+                    continue
+
+                # 2. Saut intelligent par horodatage `mod` :
+                # Les sauvegardes sont triées de la plus récente à la plus ancienne.
+                # Si la note avait mod == skip_until_mod dans une sauvegarde plus récente,
+                # toute sauvegarde prise après (skip_until_mod + 3600s) a le même état.
+                if skip_until_mod is not None and skip_until_mod > 1_000_000_000:
+                    bts = self._parse_backup_timestamp(bp)
+                    if bts is not None and bts > (skip_until_mod + 3600):
+                        conn.execute(
+                            """INSERT OR REPLACE INTO backup_scans (note_id, backup_name, backup_mtime, backup_size)
+                               VALUES (?, ?, ?, ?)""",
+                            (note_id, bname, bmtime, bsize),
+                        )
+                        conn.commit()
+                        _notify(idx + 1)
+                        continue
 
                 try:
                     backend.import_collection_package(
@@ -702,47 +774,59 @@ class NoteHistoryDB:
                         media_db=media_db,
                     )
                     bconn = sqlite3.connect(col_path)
-                    brow = bconn.execute(
-                        "SELECT mid, mod, flds, tags FROM notes WHERE id = ?", (note_id,)
-                    ).fetchone()
+                    try:
+                        brow = bconn.execute(
+                            "SELECT mid, mod, flds, tags FROM notes WHERE id = ?", (note_id,)
+                        ).fetchone()
 
-                    if brow:
-                        b_mid, b_mod, b_flds_str, b_tags_str = brow
-                        if b_mod != last_seen_mod:
-                            last_seen_mod = b_mod
+                        if brow:
+                            b_mid, b_mod, b_flds_str, b_tags_str = brow
+                            if isinstance(b_mod, (int, float)) and b_mod > 1_000_000_000:
+                                skip_until_mod = int(b_mod)
+                            if b_mod != last_seen_mod:
+                                last_seen_mod = b_mod
 
-                            # Récupérer les noms de champs
-                            fld_names = [
-                                r[0] for r in bconn.execute(
-                                    "SELECT name FROM fields WHERE ntid = ? ORDER BY ord ASC", (b_mid,)
-                                ).fetchall()
-                            ]
-                            vals = b_flds_str.split("\x1f")
-                            if fld_names and len(vals) <= len(fld_names):
-                                fld_dict = dict(zip(fld_names, vals))
-                            else:
-                                fld_dict = {fld_names[i] if i < len(fld_names) else f"Field_{i}": vals[i] for i in range(len(vals))}
+                                # Récupérer les noms de champs
+                                fld_names = [
+                                    r[0] for r in bconn.execute(
+                                        "SELECT name FROM fields WHERE ntid = ? ORDER BY ord ASC", (b_mid,)
+                                    ).fetchall()
+                                ]
+                                vals = b_flds_str.split("\x1f")
+                                if fld_names and len(vals) <= len(fld_names):
+                                    fld_dict = dict(zip(fld_names, vals))
+                                else:
+                                    fld_dict = {fld_names[i] if i < len(fld_names) else f"Field_{i}": vals[i] for i in range(len(vals))}
 
-                            b_tags = [t for t in b_tags_str.strip().split(" ") if t]
-                            fld_dict["__tags__"] = " ".join(b_tags)
-                            fj = json.dumps(fld_dict, ensure_ascii=False)
+                                b_tags = [t for t in b_tags_str.strip().split(" ") if t]
+                                fld_dict["__tags__"] = " ".join(b_tags)
+                                fj = json.dumps(fld_dict, ensure_ascii=False)
 
-                            if fj not in existing_jsons:
-                                existing_jsons.add(fj)
-                                import uuid
-                                vid = uuid.uuid4().hex
-                                dt = datetime.fromtimestamp(b_mod)
-                                b_comment = f"Sauvegarde Anki du {dt.strftime('%d/%m/%Y %H:%M')}"
-                                conn.execute(
-                                    """INSERT INTO note_versions (version_id, note_id, timestamp, source, comment, fields_json)
-                                       VALUES (?, ?, ?, 'backup', ?, ?)""",
-                                    (vid, note_id, dt.isoformat(), b_comment, fj),
-                                )
-                                conn.commit()
-                                found_count += 1
-                    bconn.close()
+                                if fj not in existing_jsons:
+                                    existing_jsons.add(fj)
+                                    import uuid
+                                    vid = uuid.uuid4().hex
+                                    dt = datetime.fromtimestamp(b_mod)
+                                    b_comment = f"Sauvegarde Anki du {dt.strftime('%d/%m/%Y %H:%M')}"
+                                    conn.execute(
+                                        """INSERT INTO note_versions (version_id, note_id, timestamp, source, comment, fields_json)
+                                           VALUES (?, ?, ?, 'backup', ?, ?)""",
+                                        (vid, note_id, dt.isoformat(), b_comment, fj),
+                                    )
+                                    found_count += 1
+                    finally:
+                        bconn.close()
+
+                    conn.execute(
+                        """INSERT OR REPLACE INTO backup_scans (note_id, backup_name, backup_mtime, backup_size)
+                           VALUES (?, ?, ?, ?)""",
+                        (note_id, bname, bmtime, bsize),
+                    )
+                    conn.commit()
                 except Exception:
-                    continue
+                    pass
+
+                _notify(idx + 1)
         finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
@@ -828,6 +912,7 @@ class NoteHistoryDB:
         """Supprime tout l'historique d'une note."""
         conn = self._conn()
         conn.execute("DELETE FROM note_versions WHERE note_id = ?", (note_id,))
+        conn.execute("DELETE FROM backup_scans WHERE note_id = ?", (note_id,))
         conn.commit()
 
     def clear_all(self) -> None:
@@ -835,6 +920,7 @@ class NoteHistoryDB:
         conn = self._conn()
         conn.execute("DELETE FROM note_versions")
         conn.execute("DELETE FROM protected_fields")
+        conn.execute("DELETE FROM backup_scans")
         conn.commit()
 
     def note_count(self) -> int:
