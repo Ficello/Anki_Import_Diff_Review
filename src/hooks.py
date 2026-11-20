@@ -776,13 +776,22 @@ def commit_changes(accepted_diffs: List[NoteDiff]) -> None:
                     continue
                 field_indices = {f["name"]: idx for idx, f in enumerate(model.get("flds", []))}
 
+                db_synced = getattr(diff, "_db_synced_fields", None)
+                if not isinstance(db_synced, dict):
+                    db_synced = {}
                 changed = False
                 for name, merged_val in diff.merged_fields.items():
                     idx = field_indices.get(name)
                     if idx is not None and idx < len(note.fields):
                         orig_val = diff.original_fields.get(name)
-                        if merged_val != orig_val:
-                            note.fields[idx] = sanitize_surrogates(merged_val)
+                        sanitized_val = sanitize_surrogates(merged_val)
+                        was_written_by_diff_session = (
+                            name in db_synced and note.fields[idx] == db_synced[name]
+                        )
+                        if merged_val != orig_val or (
+                            was_written_by_diff_session and note.fields[idx] != sanitized_val
+                        ):
+                            note.fields[idx] = sanitized_val
                             changed = True
                 note.tags = [sanitize_surrogates(t) for t in diff.tags]
 

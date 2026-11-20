@@ -753,3 +753,160 @@ def test_refresh_reviewer_if_showing_uses_redraw_not_show(monkeypatch):
     fallback_reviewer._showAnswer.assert_called_once()
     fallback_reviewer._showQuestion.assert_not_called()
     fallback_reviewer.show.assert_not_called()
+
+
+def test_history_panel_live_streaming_64bit_note_id(qtbot, tmp_db, monkeypatch):
+    """Vérifie le streaming progressif avec un note_id Anki 64 bits (> 2**31 - 1)."""
+    import threading
+    from anki_import_diff.src.ankicollab_panel import AnkiCollabHistoryPanel
+    from anki_import_diff.src.history import NoteHistoryDB
+
+    NoteHistoryDB._instance = tmp_db
+    nid = 1763569863123  # > 2**31 - 1 (timestamp ms)
+
+    scan_started = threading.Event()
+    allow_first = threading.Event()
+    allow_second = threading.Event()
+
+    def fake_scan(note_id, progress_callback=None, cancel_event=None):
+        scan_started.set()
+        allow_first.wait(timeout=5)
+        if cancel_event is not None and cancel_event.is_set():
+            return tmp_db.get_history(note_id)
+        conn = tmp_db._conn()
+        conn.execute(
+            "INSERT INTO note_versions VALUES (?, ?, ?, 'backup', 'Sauvegarde V2', ?)",
+            ("v2_id", note_id, "2026-11-10T10:00:00", '{"Recto": "V2", "__tags__": ""}'),
+        )
+        conn.commit()
+        if progress_callback:
+            progress_callback(1, 3, 1)
+
+        allow_second.wait(timeout=5)
+        if cancel_event is not None and cancel_event.is_set():
+            return tmp_db.get_history(note_id)
+        conn.execute(
+            "INSERT INTO note_versions VALUES (?, ?, ?, 'backup', 'Sauvegarde V1', ?)",
+            ("v1_id", note_id, "2026-11-01T10:00:00", '{"Recto": "V1", "__tags__": ""}'),
+        )
+        conn.commit()
+        if progress_callback:
+            progress_callback(2, 3, 1)
+            progress_callback(3, 3, 2)
+        return tmp_db.get_history(note_id)
+
+    monkeypatch.setattr(tmp_db, "scan_backups_for_note", fake_scan)
+
+    panel = AnkiCollabHistoryPanel(
+        note_id=nid,
+        field_names=["Recto"],
+        current_fields={"Recto": "V2"},
+    )
+    qtbot.addWidget(panel)
+
+    try:
+        assert scan_started.wait(timeout=2)
+        assert panel._is_scanning_backups is True
+        assert panel._list.count() == 1
+        assert panel._list.item(0).text() == "  Recherche dans les sauvegardes..."
+
+        allow_first.set()
+        qtbot.waitUntil(
+            lambda: panel._list.count() == 1
+            and panel._selected_delta is not None
+            and panel._selected_delta.version.version_id == "v2_id",
+            timeout=2000,
+        )
+        assert panel._is_scanning_backups is True
+        assert "Recherche (1/3)... 1 version(s) trouvée(s)" in panel._scan_status_lbl.text()
+
+        allow_second.set()
+        qtbot.waitUntil(lambda: not panel._is_scanning_backups, timeout=2000)
+
+        assert panel._list.count() == 2
+        assert panel._selected_delta is not None
+        assert panel._selected_delta.version.version_id == "v2_id"
+        assert panel._selected_delta.version_number == 2
+        assert panel._selected_delta.previous_version is not None
+        assert panel._selected_delta.previous_version.version_id == "v1_id"
+        assert "Sauvegardes indexées (2 nouvelle(s) version(s))." in panel._scan_status_lbl.text()
+    finally:
+        allow_first.set()
+        allow_second.set()
+        panel._cancel_active_scan()
+
+
+def test_history_panel_stale_scan_gen_and_dialog_cancel(qtbot, tmp_db, monkeypatch):
+    """Vérifie le filtrage par génération de scan, l'annulation au rejet du dialogue et close_thread_connection."""
+    import sqlite3
+    import threading
+    from anki_import_diff.src.ankicollab_panel import AnkiCollabHistoryDialog, AnkiCollabHistoryPanel
+    from anki_import_diff.src.history import NoteHistoryDB
+
+    NoteHistoryDB._instance = tmp_db
+    nid = 1763569863999
+    tmp_db.store_snapshot(nid, {"Recto": "Initial"}, source="import", comment="Initial")
+
+    # 1. Filtrage des signaux d'une génération de scan obsolète pour le même note_id 64 bits
+    monkeypatch.setattr(tmp_db, "scan_backups_for_note", lambda note_id, **kwargs: tmp_db.get_history(note_id))
+    panel = AnkiCollabHistoryPanel(
+        note_id=nid,
+        field_names=["Recto"],
+        current_fields={"Recto": "Initial"},
+    )
+    qtbot.addWidget(panel)
+    qtbot.waitUntil(lambda: not panel._is_scanning_backups, timeout=2000)
+
+    stale_gen = panel._scan_gen - 1
+    panel._scan_status_lbl.setText("Statut intact")
+    panel._on_scan_progress(nid, 1, 5, 1, True, scan_gen=stale_gen)
+    assert panel._scan_status_lbl.text() == "Statut intact"
+    panel._on_scan_finished(nid, 3, False, scan_gen=stale_gen)
+    assert panel._scan_status_lbl.text() == "Statut intact"
+
+    # 2. Annulation automatique du scan lors du reject() de AnkiCollabHistoryDialog
+    scan_started = threading.Event()
+    scan_cancelled = threading.Event()
+
+    def blocking_scan(note_id, progress_callback=None, cancel_event=None):
+        scan_started.set()
+        if cancel_event is not None and cancel_event.wait(timeout=2):
+            scan_cancelled.set()
+        return tmp_db.get_history(note_id)
+
+    monkeypatch.setattr(tmp_db, "scan_backups_for_note", blocking_scan)
+    dlg = AnkiCollabHistoryDialog(
+        note_id=1763569864001,
+        field_names=["Recto"],
+        current_fields={"Recto": "Val"},
+    )
+    qtbot.addWidget(dlg)
+    try:
+        assert scan_started.wait(timeout=2)
+        dlg.reject()
+        assert scan_cancelled.wait(timeout=2)
+        qtbot.waitUntil(lambda: not dlg.panel._is_scanning_backups, timeout=2000)
+    finally:
+        dlg.panel._cancel_active_scan()
+
+    # 3. close_thread_connection ferme uniquement la connexion du thread worker
+    main_conn = tmp_db._conn()
+    worker_holder = []
+
+    def worker():
+        w_conn = tmp_db._conn()
+        worker_holder.append((w_conn, len(tmp_db._connections)))
+        tmp_db.close_thread_connection()
+
+    t = threading.Thread(target=worker)
+    t.start()
+    t.join(timeout=2)
+
+    assert len(worker_holder) == 1
+    w_conn, count_during = worker_holder[0]
+    assert count_during == 2
+    assert len(tmp_db._connections) == 1
+    assert tmp_db._connections[0] is main_conn
+    assert main_conn.execute("SELECT 1").fetchone()[0] == 1
+    with pytest.raises(sqlite3.ProgrammingError):
+        w_conn.execute("SELECT 1")

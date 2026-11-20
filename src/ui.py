@@ -32,7 +32,7 @@ except ImportError:
     _Signal = QtCore.Signal
 
 from .savepoint import NoteDiff
-from .diff import DiffHunk, compute_hunks, apply_hunks, highlight_diff
+from .diff import DiffHunk, compute_hunks, apply_hunks, highlight_diff, normalize_html_tags
 from .theme import chrome_colors, blend_colors, PaletteMixin, _StatusDot, ThemeColor, is_dark, is_dark_mode
 
 # ---------------------------------------------------------------------------
@@ -965,11 +965,18 @@ class TagsDiffPanel(QtWidgets.QFrame, PaletteMixin):
         target = getattr(self.diff, "tags_active_target", "PROP")
 
         if not has_diff:
-            self._badge.setText("Inchangé")
-            self._badge.setStyleSheet(
-                f"color:{c['text_muted']}; font-size:10px; font-weight:600; background:{c['surface_high']}; "
-                f"border:1px solid {c['border']}; border-radius:8px; padding:1px 6px;"
-            )
+            if target == "CUSTOM":
+                self._badge.setText("Tags modifiés")
+                self._badge.setStyleSheet(
+                    f"color:{c['add_fg']}; font-size:10px; font-weight:600; background:{c['add_bg']}; "
+                    f"border:1px solid {c['add_border']}; border-radius:8px; padding:1px 6px;"
+                )
+            else:
+                self._badge.setText("Inchangé")
+                self._badge.setStyleSheet(
+                    f"color:{c['text_muted']}; font-size:10px; font-weight:600; background:{c['surface_high']}; "
+                    f"border:1px solid {c['border']}; border-radius:8px; padding:1px 6px;"
+                )
             if not self.diff.tags:
                 self._tags_display.setText(f'<i style="color:{c["text_muted"]};font-size:11px;">[Aucun tag]</i>')
             else:
@@ -978,6 +985,27 @@ class TagsDiffPanel(QtWidgets.QFrame, PaletteMixin):
                     f'border:1px solid {c["chip_border"]}; border-radius:4px; padding:2px 6px; font-size:11px;">'
                     f'{html.escape(t)}</span>'
                     for t in self.diff.tags
+                ])
+                self._tags_display.setText(chips)
+            return
+
+        if target == "CUSTOM":
+            self._badge.setText("Tags modifiés")
+            self._badge.setStyleSheet(
+                f"color:{c['add_fg']}; font-size:10px; font-weight:600; background:{c['add_bg']}; "
+                f"border:1px solid {c['add_border']}; border-radius:8px; padding:1px 6px;"
+            )
+            eff_tags = list(self.diff.tags or [])
+            if not eff_tags:
+                self._tags_display.setText(f'<i style="color:{c["text_muted"]};font-size:11px;">[Aucun tag]</i>')
+            else:
+                chips = " ".join([
+                    f'<span style="background:{c["add_bg"] if t not in orig_set else c["chip_bg"]}; '
+                    f'color:{c["add_fg"] if t not in orig_set else c["text_secondary"]}; '
+                    f'border:1px solid {c["add_border"] if t not in orig_set else c["chip_border"]}; '
+                    f'border-radius:4px; padding:2px 6px; font-size:11px;">'
+                    f'{html.escape(t)}</span>'
+                    for t in eff_tags
                 ])
                 self._tags_display.setText(chips)
             return
@@ -1244,20 +1272,16 @@ class FieldDiffPanel(QtWidgets.QFrame, PaletteMixin):
         """Retourne True si le champ a subi des modifications ou possede des hunks/editions."""
         if self.diff and self.field_name in getattr(self.diff, 'custom_edit_fields', {}):
             return True
-        if getattr(self, 'old_mod', '') != getattr(self, 'old_orig', ''):
+        if normalize_html_tags(getattr(self, 'old_mod', '')) != normalize_html_tags(getattr(self, 'old_orig', '')):
             return True
-        if getattr(self, 'prop_mod', '') != getattr(self, 'prop_orig', ''):
+        if normalize_html_tags(getattr(self, 'prop_mod', '')) != normalize_html_tags(getattr(self, 'prop_orig', '')):
             return True
         if bool(getattr(self, 'hunks', [])):
             return True
         old_o = getattr(self, 'old_orig', '') or ''
         prop_o = getattr(self, 'prop_orig', '') or ''
         if old_o != prop_o:
-            try:
-                from .diff import normalize_html_tags
-                return normalize_html_tags(old_o) != normalize_html_tags(prop_o)
-            except Exception:
-                return True
+            return normalize_html_tags(old_o) != normalize_html_tags(prop_o)
         return False
 
     def _refresh_display(self):
@@ -1301,8 +1325,8 @@ class FieldDiffPanel(QtWidgets.QFrame, PaletteMixin):
             # L'éditeur contient la proposition (prop_mod)
             # Le diff affiche l'ancienne version (old_mod)
             disp_val = self.old_mod
-            is_old_modified = (self.old_mod != self.old_orig)
-            is_prop_modified = (self.prop_mod != self.prop_orig)
+            is_old_modified = (normalize_html_tags(self.old_mod) != normalize_html_tags(self.old_orig))
+            is_prop_modified = (normalize_html_tags(self.prop_mod) != normalize_html_tags(self.prop_orig))
 
             if is_prop_modified:
                 self._badge.setText("Proposition modifiée")
@@ -1341,8 +1365,8 @@ class FieldDiffPanel(QtWidgets.QFrame, PaletteMixin):
             # L'éditeur contient l'ancien (old_mod)
             # Le diff affiche la proposition (prop_mod)
             disp_val = self.prop_mod
-            is_old_modified = (self.old_mod != self.old_orig)
-            is_prop_modified = (self.prop_mod != self.prop_orig)
+            is_old_modified = (normalize_html_tags(self.old_mod) != normalize_html_tags(self.old_orig))
+            is_prop_modified = (normalize_html_tags(self.prop_mod) != normalize_html_tags(self.prop_orig))
 
             if is_old_modified:
                 self._badge.setText("Ancien modifié")
@@ -1402,7 +1426,7 @@ class FieldDiffPanel(QtWidgets.QFrame, PaletteMixin):
         if self.diff:
             self.diff.field_active_target[self.field_name] = "PROP"
             self.diff.merged_fields[self.field_name] = self.prop_mod
-            if self.prop_mod != self.prop_orig:
+            if normalize_html_tags(self.prop_mod) != normalize_html_tags(self.prop_orig):
                 self.diff.custom_edit_fields[self.field_name] = self.prop_mod
             else:
                 self.diff.custom_edit_fields.pop(self.field_name, None)
@@ -1421,7 +1445,7 @@ class FieldDiffPanel(QtWidgets.QFrame, PaletteMixin):
         if self.diff:
             self.diff.field_active_target[self.field_name] = "OLD"
             self.diff.merged_fields[self.field_name] = self.old_mod
-            if self.old_mod != self.old_orig:
+            if normalize_html_tags(self.old_mod) != normalize_html_tags(self.old_orig):
                 self.diff.custom_edit_fields[self.field_name] = self.old_mod
             else:
                 self.diff.custom_edit_fields.pop(self.field_name, None)
@@ -1510,12 +1534,12 @@ class FieldDiffPanel(QtWidgets.QFrame, PaletteMixin):
             if self.active_target == "PARTIAL":
                 self.diff.custom_edit_fields[self.field_name] = merged_val
             elif self.active_target == "PROP":
-                if self.prop_mod != self.prop_orig:
+                if normalize_html_tags(self.prop_mod) != normalize_html_tags(self.prop_orig):
                     self.diff.custom_edit_fields[self.field_name] = self.prop_mod
                 else:
                     self.diff.custom_edit_fields.pop(self.field_name, None)
             elif self.active_target == "OLD":
-                if self.old_mod != self.old_orig:
+                if normalize_html_tags(self.old_mod) != normalize_html_tags(self.old_orig):
                     self.diff.custom_edit_fields[self.field_name] = self.old_mod
                 else:
                     self.diff.custom_edit_fields.pop(self.field_name, None)

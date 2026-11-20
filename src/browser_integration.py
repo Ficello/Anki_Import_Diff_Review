@@ -68,6 +68,13 @@ from .editor_sync import (
     highlight_field_accepted,
     highlight_field_rejected,
     make_field_edit_hook,
+    make_typing_edit_hook,
+    make_tag_edit_hook,
+    capture_editor_field_edits,
+    capture_editor_tag_edits,
+    record_in_flight_field_sync,
+    record_db_synced_fields,
+    should_drop_stale_editor_bridge_cmd,
 )
 
 
@@ -80,6 +87,8 @@ _on_commit_cb = None                        # callable appelé au commit
 _is_collab_session: Optional[bool] = None    # None/True par défaut, False explicitement pour les imports de fichiers
 _browser_panel: Optional["DiffBrowserPanel"] = None
 _field_edit_hook = None                     # hook editor_did_unfocus_field
+_typing_edit_hook = None                    # hook editor_did_fire_typing_timer
+_tag_edit_hook = None                       # hook editor_did_update_tags
 _committed = False
 _staged_to_orig: Dict[int, int] = {}       # staged_note_id → original_note_id (pour INSERT pré-insérées)
 
@@ -146,8 +155,33 @@ def set_pending_diffs(diffs: List[NoteDiff], on_commit, is_collab: Optional[bool
     _staged_to_orig.clear()
 
 
+def _remove_editor_edit_hooks() -> None:
+    """Retire proprement tous les hooks de capture d'édition de l'éditeur."""
+    global _field_edit_hook, _typing_edit_hook, _tag_edit_hook
+    if _field_edit_hook is not None:
+        try:
+            gui_hooks.editor_did_unfocus_field.remove(_field_edit_hook)
+        except (ValueError, Exception):
+            pass
+        _field_edit_hook = None
+    if _typing_edit_hook is not None:
+        try:
+            if hasattr(gui_hooks, "editor_did_fire_typing_timer"):
+                gui_hooks.editor_did_fire_typing_timer.remove(_typing_edit_hook)
+        except (ValueError, Exception):
+            pass
+        _typing_edit_hook = None
+    if _tag_edit_hook is not None:
+        try:
+            if hasattr(gui_hooks, "editor_did_update_tags"):
+                gui_hooks.editor_did_update_tags.remove(_tag_edit_hook)
+        except (ValueError, Exception):
+            pass
+        _tag_edit_hook = None
+
+
 def clear_pending_diffs() -> None:
-    global _pending_diffs, _on_commit_cb, _browser_panel, _field_edit_hook, _staged_to_orig, _is_collab_session
+    global _pending_diffs, _on_commit_cb, _browser_panel, _staged_to_orig, _is_collab_session
     try:
         from .temp_link_interceptor import TempLinkInterceptor
         interceptor = TempLinkInterceptor.instance()
@@ -160,13 +194,8 @@ def clear_pending_diffs() -> None:
     _is_collab_session = None
     _staged_to_orig.clear()
 
-    # Retirer le hook d'unfocus si installé
-    if _field_edit_hook is not None:
-        try:
-            gui_hooks.editor_did_unfocus_field.remove(_field_edit_hook)
-        except (ValueError, Exception):
-            pass
-        _field_edit_hook = None
+    # Retirer les hooks d'édition si installés
+    _remove_editor_edit_hooks()
 
     _restore_editor_save()
 
@@ -1960,14 +1989,8 @@ class DiffBrowserPanel(QtWidgets.QWidget):
         # Clear pending diffs
         clear_pending_diffs()
 
-        # Retirer le hook d'unfocus si installé
-        global _field_edit_hook
-        if _field_edit_hook is not None:
-            try:
-                gui_hooks.editor_did_unfocus_field.remove(_field_edit_hook)
-            except Exception:
-                pass
-            _field_edit_hook = None
+        # Retirer les hooks d'édition si installés
+        _remove_editor_edit_hooks()
 
         from aqt.qt import sip
         for panel in list(self._note_panels.values()):
@@ -2705,6 +2728,9 @@ class DiffBrowserPanel(QtWidgets.QWidget):
                     pass
 
             if nid is not None and nid != self._current_nid:
+                target_diff = get_diff_for_note(nid)
+                if target_diff is not None:
+                    target_diff._synced_to_editor = False
                 self.select_note(nid)
         except Exception as e:
             print(f"[anki-diff] _on_browser_row_changed error: {e}")
@@ -2716,17 +2742,45 @@ class DiffBrowserPanel(QtWidgets.QWidget):
             except Exception:
                 pass
 
+    def _on_captured_field_edit(self, diff: NoteDiff, field_name: str, new_val: str) -> None:
+        try:
+            from aqt.qt import sip
+            if sip.isdeleted(self):
+                return
+        except Exception:
+            pass
+        panel = self._note_panels.get(diff.note_id)
+        if panel:
+            panel._on_field_edited_by_user(field_name, new_val)
+
+    def _on_captured_tag_edit(self, diff: NoteDiff, new_tags: List[str]) -> None:
+        try:
+            from aqt.qt import sip
+            if sip.isdeleted(self):
+                return
+        except Exception:
+            pass
+        panel = self._note_panels.get(diff.note_id)
+        if panel and hasattr(panel, "_tags_panel") and panel._tags_panel:
+            panel._tags_panel.refresh()
+        self._update_status()
+
     def _install_field_edit_hook(self):
-        global _field_edit_hook
-        if _field_edit_hook is not None:
-            return
-        def _on_field_edited(diff, field_name, new_val):
-            panel = self._note_panels.get(diff.note_id)
-            if panel:
-                panel._on_field_edited_by_user(field_name, new_val)
-        hook = make_field_edit_hook(get_diff_for_note, _on_field_edited)
-        _field_edit_hook = hook
-        gui_hooks.editor_did_unfocus_field.append(hook)
+        global _field_edit_hook, _typing_edit_hook, _tag_edit_hook
+        if _field_edit_hook is None:
+            hook = make_field_edit_hook(get_diff_for_note, self._on_captured_field_edit)
+            _field_edit_hook = hook
+            gui_hooks.editor_did_unfocus_field.append(hook)
+        if _typing_edit_hook is None and hasattr(gui_hooks, "editor_did_fire_typing_timer"):
+            typing_hook = make_typing_edit_hook(get_diff_for_note, self._on_captured_field_edit)
+            if hasattr(gui_hooks.editor_did_fire_typing_timer, "append"):
+                _typing_edit_hook = typing_hook
+                gui_hooks.editor_did_fire_typing_timer.append(typing_hook)
+        if _tag_edit_hook is None and hasattr(gui_hooks, "editor_did_update_tags"):
+            tag_hook = make_tag_edit_hook(get_diff_for_note, self._on_captured_tag_edit)
+            if hasattr(gui_hooks.editor_did_update_tags, "append"):
+                _tag_edit_hook = tag_hook
+                gui_hooks.editor_did_update_tags.append(tag_hook)
 
     # ── Mettre à jour l'éditeur courant ─────────────────────────────────────
 
@@ -2904,15 +2958,44 @@ class DiffBrowserPanel(QtWidgets.QWidget):
 
     def apply_commit(self, close_browser: bool = False) -> None:
         """Applique les modifications acceptées dans la collection et nettoie le panneau."""
+        # 0. Stopper les timers de sync en attente et flusher leurs champs vers merged_fields
+        for nid, panel in list(self._note_panels.items()):
+            try:
+                if hasattr(panel, "_sync_timer") and panel._sync_timer.isActive():
+                    panel._sync_timer.stop()
+                dirty = set(getattr(panel, "_dirty_fields", ()))
+                full_sync = getattr(panel, "_full_sync_requested", False)
+                if dirty or full_sync:
+                    target_fnames = panel._field_panels.keys() if full_sync else dirty
+                    for fname in target_fnames:
+                        fp = panel._field_panels.get(fname)
+                        if fp is None:
+                            continue
+                        if fname in panel._diff.custom_edit_fields:
+                            panel._diff.merged_fields[fname] = panel._diff.custom_edit_fields[fname]
+                        else:
+                            panel._diff.merged_fields[fname] = fp.get_merged_value()
+                    panel._dirty_fields.clear()
+                    panel._full_sync_requested = False
+            except Exception:
+                pass
+
         # 1. Flush de l'éditeur actif dans la note
         editor = getattr(self._browser, "editor", None)
         note = _get_editor_note(editor)
         if editor and note:
             diff = get_diff_for_note(note.id)
             if diff:
+                capture_editor_field_edits(editor, get_diff_for_note, self._on_captured_field_edit)
+                capture_editor_tag_edits(editor, get_diff_for_note, self._on_captured_tag_edit)
+                pending_sync = getattr(diff, "_pending_sync_fields", None) or set()
                 for idx, field_name in enumerate(diff.field_names):
                     if idx < len(note.fields):
-                        if field_name in diff.custom_edit_fields:
+                        if (
+                            field_name in diff.custom_edit_fields
+                            and field_name not in pending_sync
+                            and isinstance(note.fields[idx], str)
+                        ):
                             val = note.fields[idx]
                             diff.custom_edit_fields[field_name] = val
                             diff.merged_fields[field_name] = val
@@ -2921,6 +3004,8 @@ class DiffBrowserPanel(QtWidgets.QWidget):
                             # la version acceptee du diff est reinjectee dans la note
                             note.fields[idx] = diff.merged_fields.get(field_name, "")
                 note.tags = list(diff.tags)
+                if isinstance(pending_sync, set):
+                    pending_sync.clear()
 
         # 2. Flush des valeurs mergées de chaque panel
         for nid, panel in self._note_panels.items():
@@ -3380,7 +3465,11 @@ class NoteDiffPanelWithSync(QtWidgets.QScrollArea):
         if editor:
             nid = getattr(editor, "nid", None)
             note = _get_editor_note(editor)
-            if nid == self._diff.note_id or (note and getattr(note, "id", None) == self._diff.note_id):
+            note_nid = getattr(note, "id", None) if note else None
+            valid_ids = {self._diff.note_id}
+            if getattr(self._diff, "staged_note_id", 0):
+                valid_ids.add(self._diff.staged_note_id)
+            if nid in valid_ids or note_nid in valid_ids:
                 self._editor = editor
                 return
         self._editor = None
@@ -3431,11 +3520,55 @@ class NoteDiffPanelWithSync(QtWidgets.QScrollArea):
                 sync_editor_from_hunks(editor, self._diff)
             else:
                 sync_editor_from_hunks(editor, self._diff, only_fields=dirty, sync_tags=False)
+        else:
+            pending_sync = getattr(self._diff, "_pending_sync_fields", None)
+            if isinstance(pending_sync, set):
+                pending_sync.difference_update(target_fnames)
+            in_flight = getattr(self._diff, "_in_flight_sync_fields", None)
+            if isinstance(in_flight, dict):
+                for fname in target_fnames:
+                    in_flight.pop(fname, None)
 
     def _on_field_hunk_changed(self, field_name: str, fp: FieldDiffPanel) -> None:
         """Appele quand un hunk est accepte/rejete dans un champ."""
-        if all(h.accepted for h in fp.hunks):
-            self._diff.custom_edit_fields.pop(field_name, None)
+        expected_val = (
+            self._diff.custom_edit_fields[field_name]
+            if field_name in self._diff.custom_edit_fields
+            else fp.get_merged_value()
+        )
+        self._diff.merged_fields[field_name] = expected_val
+
+        pending_sync = getattr(self._diff, "_pending_sync_fields", None)
+        if not isinstance(pending_sync, set):
+            pending_sync = set()
+            setattr(self._diff, "_pending_sync_fields", pending_sync)
+        pending_sync.add(field_name)
+
+        editor = self._browser_panel.get_editor_for_note(self._diff.note_id)
+        if not editor:
+            fallback_ed = getattr(self, "_editor", None)
+            if fallback_ed is not None:
+                ed_note = _get_editor_note(fallback_ed)
+                ed_nid = getattr(ed_note, "id", None) if ed_note is not None else getattr(fallback_ed, "nid", None)
+                valid_ids = {self._diff.note_id}
+                if getattr(self._diff, "staged_note_id", 0):
+                    valid_ids.add(self._diff.staged_note_id)
+                if ed_nid in valid_ids:
+                    editor = fallback_ed
+
+        if editor is not None and field_name in self._diff.field_names:
+            note = _get_editor_note(editor)
+            idx = self._diff.field_names.index(field_name)
+            if (
+                note is not None
+                and isinstance(getattr(note, "fields", None), (list, tuple))
+                and idx < len(note.fields)
+                and isinstance(note.fields[idx], str)
+            ):
+                prev_val = note.fields[idx]
+                record_in_flight_field_sync(self._diff, field_name, prev_val, expected_val)
+                note.fields[idx] = expected_val
+
         self._dirty_fields.add(field_name)
         self._sync_all_merged_then_editor()
         self._update_fields_visibility()
@@ -3574,9 +3707,17 @@ def _diff_save_current_note(editor_self) -> None:
     note_id = getattr(editor_self.note, "id", 0)
     if _browser_panel is not None and _pending_diffs and get_diff_for_note(note_id) is not None:
         try:
+            on_field_cb = None
+            on_tag_cb = None
+            if isinstance(_browser_panel, DiffBrowserPanel):
+                on_field_cb = _browser_panel._on_captured_field_edit
+                on_tag_cb = _browser_panel._on_captured_tag_edit
+            capture_editor_field_edits(editor_self, get_diff_for_note, on_field_cb)
+            capture_editor_tag_edits(editor_self, get_diff_for_note, on_tag_cb)
             col = getattr(editor_self, "mw", None) and getattr(editor_self.mw, "col", None)
             if col:
                 col.update_note(editor_self.note)
+                record_db_synced_fields(get_diff_for_note(note_id), editor_self.note)
             parent_win = getattr(editor_self, "parentWindow", None)
             browser = parent_win if hasattr(parent_win, "_previewer") else None
             if browser and hasattr(browser, "_previewer") and browser._previewer:
@@ -3842,6 +3983,19 @@ def _on_editor_did_init(editor) -> None:
             return
         elif cmd == "diff_editor_escape":
             _handle_editor_escape(editor)
+            return
+        elif (
+            _browser_panel is not None
+            and _pending_diffs
+            and isinstance(cmd, str)
+            and (cmd.startswith("blur:") or cmd.startswith("key:"))
+            and should_drop_stale_editor_bridge_cmd(editor, cmd, get_diff_for_note)
+        ):
+            if cmd.startswith("blur:"):
+                try:
+                    editor.currentField = None
+                except Exception:
+                    pass
             return
         return original_bridge(cmd)
 
@@ -4827,7 +4981,12 @@ def _show_standalone_history(browser) -> None:
     panel.version_retrieved.connect(on_restore)
     panel.protection_tags_applied.connect(on_protect_tags)
     layout.addWidget(panel)
-    dialog.exec()
+    dialog.finished.connect(panel._cancel_active_scan)
+    try:
+        dialog.exec()
+    finally:
+        panel._cancel_active_scan()
+        dialog.deleteLater()
 
 
 def _show_reviewer_history() -> None:
@@ -4939,7 +5098,12 @@ def _show_reviewer_history() -> None:
     panel.version_retrieved.connect(on_restore)
     panel.protection_tags_applied.connect(on_protect_tags)
     layout.addWidget(panel)
-    dialog.exec()
+    dialog.finished.connect(panel._cancel_active_scan)
+    try:
+        dialog.exec()
+    finally:
+        panel._cancel_active_scan()
+        dialog.deleteLater()
 
 
 def _on_reviewer_did_show_question(card) -> None:
@@ -5075,7 +5239,12 @@ def _show_editor_history(editor: Any) -> None:
     panel.version_retrieved.connect(on_restore)
     panel.protection_tags_applied.connect(on_protect_tags)
     layout.addWidget(panel)
-    dialog.exec()
+    dialog.finished.connect(panel._cancel_active_scan)
+    try:
+        dialog.exec()
+    finally:
+        panel._cancel_active_scan()
+        dialog.deleteLater()
 
 
 def _on_editor_did_init_buttons(buttons: List[Any], editor: Any) -> None:

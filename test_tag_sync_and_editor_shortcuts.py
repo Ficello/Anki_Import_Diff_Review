@@ -1656,5 +1656,616 @@ def test_sync_editor_from_hunks_ignores_mismatched_note():
     assert note_b.tags == ["B_tag"]
 
 
+# ---------------------------------------------------------------------------
+# Tests de non-régression : conservation des éditions manuelles, rejets et tags
+# ---------------------------------------------------------------------------
+
+
+def _make_nid_1641745603180_diff():
+    return NoteDiff(
+        note_id=1641745603180,
+        action="UPDATE",
+        model_name="Basique-EDN-Picat-8b691 (AnkiCollab)",
+        field_names=["Recto", "Verso", "Infos supp", "References"],
+        original_fields={
+            "Recto": "Réalisation d'un prick test",
+            "Verso": "<ul><li>Lecture à 15 min</li></ul>",
+            "Infos supp": "Triade de Lewis",
+            "References": "",
+        },
+        updated_fields={
+            "Recto": "Réalisation d'un prick test",
+            "Verso": "<ul><li>Lecture à 15-20 min</li></ul>",
+            "Infos supp": 'Triade de Lewis<br><img src="edn_item_186_pneumo9e_prick_tests.webp">',
+            "References": "CEP. Pneumologie 9e éd. 2026.",
+        },
+        original_tags=["EDN::item-186", "Rang::B"],
+        updated_tags=["EDN::item-186", "MAJ::11/26", "Rang::B"],
+        tags=["EDN::item-186", "MAJ::11/26", "Rang::B"],
+    )
+
+
+class _FakeCollection:
+    def __init__(self, field_names):
+        self._notes = {}
+        self._field_names = list(field_names)
+        self.models = MagicMock()
+        self.models.get.return_value = {
+            "name": "Basique-EDN-Picat-8b691 (AnkiCollab)",
+            "flds": [{"name": fn} for fn in self._field_names],
+        }
+        self.db = MagicMock()
+        self.db.all.return_value = []
+        self.media = MagicMock()
+        self.media.escape_media_filenames = lambda x, unescape=False: x
+
+    def add(self, note):
+        self._notes[note.id] = (list(note.fields), list(note.tags))
+
+    def get_note(self, nid):
+        flds, tgs = self._notes[nid]
+        n = MockNote(nid, list(flds), list(tgs))
+        n.mid = 1
+        return n
+
+    def update_note(self, note):
+        self._notes[note.id] = (list(note.fields), list(note.tags))
+
+
+class _BridgeAwareEditor(MockEditor):
+    def __init__(self, note, col, deferred_callbacks=None):
+        super().__init__(note)
+        self.mw = MagicMock()
+        self.mw.col = col
+        self.deferred_callbacks = deferred_callbacks
+        self.bridge_history = []
+        self._links = {}
+
+        def _eval_cb(js, cb=None):
+            self.js_calls.append(js)
+            if cb is not None:
+                if self.deferred_callbacks is not None and "fieldsMap" in js:
+                    self.deferred_callbacks.append(cb)
+                else:
+                    cb("ok")
+
+        self.web.evalWithCallback = _eval_cb
+
+    def mungeHTML(self, txt):
+        return "" if txt in ("<br>", "<div><br></div>") else txt
+
+    def onBridgeCmd(self, cmd):
+        self.bridge_history.append(cmd)
+        if cmd.startswith("blur:") or cmd.startswith("key:"):
+            typ, ord_str, nid_str, txt = cmd.split(":", 3)
+            ord_idx = int(ord_str)
+            nid = int(nid_str)
+            if not self.note or nid != self.note.id:
+                return
+            self.note.fields[ord_idx] = self.mungeHTML(txt)
+            bi._diff_save_current_note(self)
+            if typ == "blur":
+                self.currentField = None
+                from aqt import gui_hooks
+                gui_hooks.editor_did_unfocus_field(False, self.note, ord_idx)
+            else:
+                from aqt import gui_hooks
+                if hasattr(gui_hooks, "editor_did_fire_typing_timer"):
+                    gui_hooks.editor_did_fire_typing_timer(self.note)
+
+
+def test_manual_edit_with_changed_false_survives_card_navigation(qtbot):
+    """Retirer une photo dans l'éditeur (Anki passe changed=False à editor_did_unfocus_field)
+    doit être capturé et conservé lorsqu'on change de carte puis qu'on revient dessus."""
+    from aqt import gui_hooks
+
+    diff = _make_nid_1641745603180_diff()
+    other_diff = NoteDiff(
+        note_id=999999,
+        action="UPDATE",
+        model_name="Basique-EDN-Picat-8b691 (AnkiCollab)",
+        field_names=["Recto", "Verso", "Infos supp", "References"],
+        original_fields={"Recto": "Q2", "Verso": "A2", "Infos supp": "", "References": ""},
+        updated_fields={"Recto": "Q2_new", "Verso": "A2", "Infos supp": "", "References": ""},
+    )
+
+    col = _FakeCollection(diff.field_names)
+    col.add(MockNote(1641745603180, [diff.original_fields[f] for f in diff.field_names], diff.original_tags))
+    col.add(MockNote(999999, ["Q2", "A2", "", ""], []))
+
+    note = col.get_note(1641745603180)
+    editor = _BridgeAwareEditor(note, col)
+
+    class FakeBrowser(QtWidgets.QMainWindow):
+        def __init__(self):
+            super().__init__()
+            self.table = QtWidgets.QTableView(self)
+            self.editor = editor
+            self.col = col
+
+        def selected_notes(self):
+            return [editor.note.id] if editor.note else []
+
+    bi.set_pending_diffs([diff, other_diff], lambda x: None)
+    browser = FakeBrowser()
+    qtbot.addWidget(browser)
+
+    try:
+        panel = DiffBrowserPanel(browser)
+        bi._browser_panel = panel
+        panel.select_note(1641745603180)
+        bi._on_editor_did_load_note(editor)
+
+        # À l'ouverture, l'éditeur a reçu l'image proposée
+        assert "edn_item_186_pneumo9e_prick_tests.webp" in editor.note.fields[2]
+
+        # L'utilisateur supprime la photo dans Infos supp ; Anki appelle editor_did_unfocus_field avec changed=False
+        editor.note.fields[2] = "Triade de Lewis (sans image)"
+        gui_hooks.editor_did_unfocus_field(False, editor.note, 2)
+
+        assert diff.merged_fields["Infos supp"] == "Triade de Lewis (sans image)"
+        assert diff.prop_mod_fields["Infos supp"] == "Triade de Lewis (sans image)"
+        assert diff.custom_edit_fields["Infos supp"] == "Triade de Lewis (sans image)"
+        fp_info = panel._note_panels[1641745603180]._field_panels["Infos supp"]
+        assert fp_info._badge.text() == "Proposition modifiée"
+
+        # Simuler un état SQLite encore vierge de la modif manuelle (ex: navigation avant save)
+        col._notes[1641745603180][0][2] = diff.updated_fields["Infos supp"]
+
+        # Aller sur une autre carte, puis revenir sur 1641745603180
+        editor.note = col.get_note(999999)
+        bi._on_editor_did_load_note(editor)
+
+        editor.note = col.get_note(1641745603180)
+        bi._on_editor_did_load_note(editor)
+
+        # L'édition manuelle sans image doit être conservée et réappliquée dans l'éditeur et la base
+        assert editor.note.fields[2] == "Triade de Lewis (sans image)"
+        assert diff.merged_fields["Infos supp"] == "Triade de Lewis (sans image)"
+        assert col.get_note(1641745603180).fields[2] == "Triade de Lewis (sans image)"
+    finally:
+        bi.clear_pending_diffs()
+        bi._browser_panel = None
+
+
+def test_reject_field_keep_old_survives_navigation_and_commits_original_over_synced_db(qtbot, monkeypatch):
+    """Refuser References ('Garder l'ancien') doit survivre au changement de carte et restaurer
+    l'original en base lors de commit_changes même si sync_editor_from_hunks avait écrit la proposition."""
+    from src.hooks import commit_changes
+
+    diff = _make_nid_1641745603180_diff()
+    other_diff = NoteDiff(
+        note_id=999998,
+        action="UPDATE",
+        model_name="Basique-EDN-Picat-8b691 (AnkiCollab)",
+        field_names=["Recto", "Verso", "Infos supp", "References"],
+        original_fields={"Recto": "Q2", "Verso": "A2", "Infos supp": "", "References": ""},
+        updated_fields={"Recto": "Q2_new", "Verso": "A2", "Infos supp": "", "References": ""},
+    )
+
+    col = _FakeCollection(diff.field_names)
+    col.add(MockNote(1641745603180, [diff.original_fields[f] for f in diff.field_names], diff.original_tags))
+    col.add(MockNote(999998, ["Q2", "A2", "", ""], []))
+
+    note = col.get_note(1641745603180)
+    editor = _BridgeAwareEditor(note, col)
+
+    class FakeBrowser(QtWidgets.QMainWindow):
+        def __init__(self):
+            super().__init__()
+            self.table = QtWidgets.QTableView(self)
+            self.editor = editor
+            self.col = col
+
+        def selected_notes(self):
+            return [editor.note.id] if editor.note else []
+
+    bi.set_pending_diffs([diff, other_diff], lambda x: None)
+    browser = FakeBrowser()
+    qtbot.addWidget(browser)
+
+    try:
+        panel = DiffBrowserPanel(browser)
+        bi._browser_panel = panel
+        panel.select_note(1641745603180)
+        bi._on_editor_did_load_note(editor)
+
+        # La proposition a été synchronisée en SQLite à l'ouverture de la carte
+        assert col.get_note(1641745603180).fields[3] == "CEP. Pneumologie 9e éd. 2026."
+        assert diff._db_synced_fields["References"] == "CEP. Pneumologie 9e éd. 2026."
+
+        # Cliquer sur "Garder l'ancien" pour References
+        fp_ref = panel._note_panels[1641745603180]._field_panels["References"]
+        fp_ref._reject_all()
+
+        # Changer de carte immédiatement AVANT le timer de 30ms (SQLite garde encore la proposition)
+        editor.note = col.get_note(999998)
+        bi._on_editor_did_load_note(editor)
+        qtbot.wait(80)
+
+        assert diff.merged_fields["References"] == ""
+        assert fp_ref.active_target == "OLD"
+        assert col.get_note(1641745603180).fields[3] == "CEP. Pneumologie 9e éd. 2026."
+
+        # Vérifier que commit_changes restaure bien l'original "" même si SQLite contenait la proposition
+        monkeypatch.setattr(bi.aqt, "mw", MagicMock(col=col))
+        import src.hooks as hooks_mod
+        monkeypatch.setattr(hooks_mod.aqt, "mw", MagicMock(col=col))
+        commit_changes([diff])
+        assert col.get_note(1641745603180).fields[3] == ""
+
+        # Et vérifier qu'un aller-retour dans l'éditeur garde aussi ""
+        col._notes[1641745603180][0][3] = ""
+        editor.note = col.get_note(1641745603180)
+        bi._on_editor_did_load_note(editor)
+        assert editor.note.fields[3] == ""
+        assert diff.merged_fields["References"] == ""
+    finally:
+        bi.clear_pending_diffs()
+        bi._browser_panel = None
+
+
+def test_typing_timer_and_save_current_note_capture_edits_without_blur(qtbot):
+    """Les éditions via editor_did_fire_typing_timer ou _diff_save_current_note (sans blur)
+    doivent être capturées et conservées au retour sur la carte."""
+    from aqt import gui_hooks
+
+    diff = _make_nid_1641745603180_diff()
+    col = _FakeCollection(diff.field_names)
+    col.add(MockNote(1641745603180, [diff.original_fields[f] for f in diff.field_names], diff.original_tags))
+
+    note = col.get_note(1641745603180)
+    editor = _BridgeAwareEditor(note, col)
+
+    class FakeBrowser(QtWidgets.QMainWindow):
+        def __init__(self):
+            super().__init__()
+            self.table = QtWidgets.QTableView(self)
+            self.editor = editor
+            self.col = col
+
+        def selected_notes(self):
+            return [1641745603180]
+
+    bi.set_pending_diffs([diff], lambda x: None)
+    browser = FakeBrowser()
+    qtbot.addWidget(browser)
+
+    try:
+        panel = DiffBrowserPanel(browser)
+        bi._browser_panel = panel
+        panel.select_note(1641745603180)
+        bi._on_editor_did_load_note(editor)
+
+        # 1. Capture via typing timer seul (pas de blur)
+        editor.note.fields[2] = "Triade de Lewis (typing)"
+        if hasattr(gui_hooks, "editor_did_fire_typing_timer"):
+            gui_hooks.editor_did_fire_typing_timer(editor.note)
+        else:
+            bi._diff_save_current_note(editor)
+
+        assert diff.merged_fields["Infos supp"] == "Triade de Lewis (typing)"
+        assert diff.custom_edit_fields["Infos supp"] == "Triade de Lewis (typing)"
+
+        # 2. Capture via _diff_save_current_note seul (ex: saveNow au changement de carte)
+        editor.note.fields[2] = "Triade de Lewis (saveNow)"
+        bi._diff_save_current_note(editor)
+
+        assert diff.merged_fields["Infos supp"] == "Triade de Lewis (saveNow)"
+        assert diff.custom_edit_fields["Infos supp"] == "Triade de Lewis (saveNow)"
+
+        # Simuler rechargement de la note en revenant dessus
+        editor.note = col.get_note(1641745603180)
+        bi._on_editor_did_load_note(editor)
+        assert editor.note.fields[2] == "Triade de Lewis (saveNow)"
+    finally:
+        bi.clear_pending_diffs()
+        bi._browser_panel = None
+
+
+def test_stale_blur_after_field_reject_is_dropped_but_subsequent_edit_captured(qtbot):
+    """Un message blur: périmé arrivé pendant la synchro JS d'un champ rejeté doit être ignoré,
+    tandis qu'une édition manuelle ultérieure après la fin du JS doit être capturée."""
+    diff = _make_nid_1641745603180_diff()
+    col = _FakeCollection(diff.field_names)
+    col.add(MockNote(1641745603180, [diff.original_fields[f] for f in diff.field_names], diff.original_tags))
+
+    deferred_callbacks = []
+    note = col.get_note(1641745603180)
+    editor = _BridgeAwareEditor(note, col, deferred_callbacks=deferred_callbacks)
+    bi._on_editor_did_init(editor)
+
+    class FakeBrowser(QtWidgets.QMainWindow):
+        def __init__(self):
+            super().__init__()
+            self.table = QtWidgets.QTableView(self)
+            self.editor = editor
+            self.col = col
+
+        def selected_notes(self):
+            return [1641745603180]
+
+    bi.set_pending_diffs([diff], lambda x: None)
+    browser = FakeBrowser()
+    qtbot.addWidget(browser)
+
+    try:
+        panel = DiffBrowserPanel(browser)
+        bi._browser_panel = panel
+        panel.select_note(1641745603180)
+        bi._on_editor_did_load_note(editor)
+        for cb in list(deferred_callbacks):
+            cb("ok")
+        deferred_callbacks.clear()
+
+        fp_ref = panel._note_panels[1641745603180]._field_panels["References"]
+        fp_ref._reject_all()
+
+        # Avant la fin du debounce / JS : un blur tardif transporte l'ancienne proposition
+        editor.onBridgeCmd("blur:3:1641745603180:CEP. Pneumologie 9e éd. 2026.")
+        assert editor.note.fields[3] == ""
+        assert diff.merged_fields["References"] == ""
+        assert fp_ref.active_target == "OLD"
+
+        # Le timer 30ms envoie le JS batch ; un blur avant on_complete reste périmé
+        qtbot.wait(80)
+        assert len(deferred_callbacks) >= 1
+        editor.onBridgeCmd("blur:3:1641745603180:CEP. Pneumologie 9e éd. 2026.")
+        assert editor.note.fields[3] == ""
+        assert diff.merged_fields["References"] == ""
+
+        # Fin d'exécution du JS dans Chromium
+        for cb in list(deferred_callbacks):
+            cb("ok")
+        deferred_callbacks.clear()
+
+        # Une nouvelle édition manuelle sur References après on_complete doit être capturée
+        editor.onBridgeCmd("blur:3:1641745603180:Ma référence perso")
+        assert editor.note.fields[3] == "Ma référence perso"
+        assert diff.merged_fields["References"] == "Ma référence perso"
+        assert diff.old_mod_fields["References"] == "Ma référence perso"
+    finally:
+        bi.clear_pending_diffs()
+        bi._browser_panel = None
+
+
+def test_blur_on_other_field_during_sync_timer_captures_edit_and_preserves_reject(qtbot):
+    """Éditer Infos supp puis cliquer immédiatement 'Garder l'ancien' sur References avec blur
+    sur Infos supp avant la fin du timer 30ms doit capturer Infos supp et préserver le rejet de References."""
+    from aqt import gui_hooks
+
+    diff = _make_nid_1641745603180_diff()
+    col = _FakeCollection(diff.field_names)
+    col.add(MockNote(1641745603180, [diff.original_fields[f] for f in diff.field_names], diff.original_tags))
+
+    note = col.get_note(1641745603180)
+    editor = _BridgeAwareEditor(note, col)
+
+    class FakeBrowser(QtWidgets.QMainWindow):
+        def __init__(self):
+            super().__init__()
+            self.table = QtWidgets.QTableView(self)
+            self.editor = editor
+            self.col = col
+
+        def selected_notes(self):
+            return [1641745603180]
+
+    bi.set_pending_diffs([diff], lambda x: None)
+    browser = FakeBrowser()
+    qtbot.addWidget(browser)
+
+    try:
+        panel = DiffBrowserPanel(browser)
+        bi._browser_panel = panel
+        panel.select_note(1641745603180)
+        bi._on_editor_did_load_note(editor)
+
+        # L'utilisateur modifie Infos supp dans l'éditeur sans quitter le champ,
+        # puis clique directement sur "Garder l'ancien" pour References.
+        editor.note.fields[2] = "Triade de Lewis (éditée)"
+        fp_ref = panel._note_panels[1641745603180]._field_panels["References"]
+        fp_ref._reject_all()
+
+        # Le blur d'Infos supp arrive pendant la fenêtre de 30ms avant _do_sync_editor
+        gui_hooks.editor_did_unfocus_field(False, editor.note, 2)
+
+        qtbot.wait(80)
+
+        assert diff.merged_fields["Infos supp"] == "Triade de Lewis (éditée)"
+        assert editor.note.fields[2] == "Triade de Lewis (éditée)"
+        assert diff.merged_fields["References"] == ""
+        assert editor.note.fields[3] == ""
+        assert fp_ref.active_target == "OLD"
+    finally:
+        bi.clear_pending_diffs()
+        bi._browser_panel = None
+
+
+def test_toggle_reject_then_accept_preserves_custom_prop_mod(qtbot):
+    """Basculer 'Garder l'ancien' puis revenir sur 'Accepter' sur un champ modifié manuellement
+    ne doit pas effacer prop_mod / custom_edit_fields."""
+    from aqt import gui_hooks
+
+    diff = _make_nid_1641745603180_diff()
+    col = _FakeCollection(diff.field_names)
+    col.add(MockNote(1641745603180, [diff.original_fields[f] for f in diff.field_names], diff.original_tags))
+
+    note = col.get_note(1641745603180)
+    editor = _BridgeAwareEditor(note, col)
+
+    class FakeBrowser(QtWidgets.QMainWindow):
+        def __init__(self):
+            super().__init__()
+            self.table = QtWidgets.QTableView(self)
+            self.editor = editor
+            self.col = col
+
+        def selected_notes(self):
+            return [1641745603180]
+
+    bi.set_pending_diffs([diff], lambda x: None)
+    browser = FakeBrowser()
+    qtbot.addWidget(browser)
+
+    try:
+        panel = DiffBrowserPanel(browser)
+        bi._browser_panel = panel
+        panel.select_note(1641745603180)
+        bi._on_editor_did_load_note(editor)
+
+        editor.note.fields[2] = "Triade de Lewis (perso)"
+        gui_hooks.editor_did_unfocus_field(False, editor.note, 2)
+        assert diff.custom_edit_fields["Infos supp"] == "Triade de Lewis (perso)"
+
+        fp_info = panel._note_panels[1641745603180]._field_panels["Infos supp"]
+        fp_info._reject_all()
+        qtbot.wait(80)
+        assert diff.merged_fields["Infos supp"] == "Triade de Lewis"
+        assert editor.note.fields[2] == "Triade de Lewis"
+
+        fp_info._accept_all()
+        qtbot.wait(80)
+        assert diff.merged_fields["Infos supp"] == "Triade de Lewis (perso)"
+        assert diff.custom_edit_fields["Infos supp"] == "Triade de Lewis (perso)"
+        assert editor.note.fields[2] == "Triade de Lewis (perso)"
+    finally:
+        bi.clear_pending_diffs()
+        bi._browser_panel = None
+
+
+def test_manual_tag_edit_survives_card_navigation_without_reentrancy(qtbot):
+    """Une modification manuelle des tags dans l'éditeur doit être capturée, afficher 'Tags modifiés',
+    survivre à la navigation entre cartes et ne provoquer aucune réentrance avec sync_tags_to_editor."""
+    from aqt import gui_hooks
+
+    diff = _make_nid_1641745603180_diff()
+    other_diff = NoteDiff(
+        note_id=999997,
+        action="UPDATE",
+        model_name="Basique-EDN-Picat-8b691 (AnkiCollab)",
+        field_names=["Recto", "Verso", "Infos supp", "References"],
+        original_fields={"Recto": "Q2", "Verso": "A2", "Infos supp": "", "References": ""},
+        updated_fields={"Recto": "Q2_new", "Verso": "A2", "Infos supp": "", "References": ""},
+    )
+
+    col = _FakeCollection(diff.field_names)
+    col.add(MockNote(1641745603180, [diff.original_fields[f] for f in diff.field_names], diff.original_tags))
+    col.add(MockNote(999997, ["Q2", "A2", "", ""], []))
+
+    note = col.get_note(1641745603180)
+    editor = _BridgeAwareEditor(note, col)
+
+    class FakeBrowser(QtWidgets.QMainWindow):
+        def __init__(self):
+            super().__init__()
+            self.table = QtWidgets.QTableView(self)
+            self.editor = editor
+            self.col = col
+
+        def selected_notes(self):
+            return [editor.note.id] if editor.note else []
+
+    bi.set_pending_diffs([diff, other_diff], lambda x: None)
+    browser = FakeBrowser()
+    qtbot.addWidget(browser)
+
+    try:
+        panel = DiffBrowserPanel(browser)
+        bi._browser_panel = panel
+        panel.select_note(1641745603180)
+        bi._on_editor_did_load_note(editor)
+
+        # L'utilisateur ajoute un tag personnel dans l'éditeur
+        custom_tags = ["EDN::item-186", "MAJ::11/26", "Rang::B", "A_revoir_perso"]
+        editor.note.tags = list(custom_tags)
+        gui_hooks.editor_did_update_tags(editor.note)
+
+        assert diff.tags == custom_tags
+        assert diff.tags_active_target == "CUSTOM"
+        note_panel = panel._note_panels[1641745603180]
+        assert note_panel._tags_panel._badge.text() == "Tags modifiés"
+
+        # Vérifier qu'une sync programmatique ne provoque pas de réentrance
+        sync_tags_to_editor(editor, custom_tags)
+        assert diff.tags == custom_tags
+        assert diff.tags_active_target == "CUSTOM"
+
+        # Aller sur une autre carte, puis revenir sur 1641745603180
+        editor.note = col.get_note(999997)
+        bi._on_editor_did_load_note(editor)
+
+        col._notes[1641745603180] = (col._notes[1641745603180][0], list(diff.original_tags))
+        editor.note = col.get_note(1641745603180)
+        bi._on_editor_did_load_note(editor)
+
+        assert editor.note.tags == custom_tags
+        assert diff.tags == custom_tags
+        assert note_panel._tags_panel._badge.text() == "Tags modifiés"
+    finally:
+        bi.clear_pending_diffs()
+        bi._browser_panel = None
+
+
+def test_unsynced_note_save_or_typing_before_load_does_not_mark_prop_modified(qtbot):
+    """Un événement typing/blur/save sur une note fraîchement chargée avec original_fields
+    AVANT que _on_editor_did_load_note n'ait synchronisé les propositions ne doit pas
+    marquer les champs comme 'Proposition modifiée' ni écraser les propositions."""
+    from aqt import gui_hooks
+
+    diff = _make_nid_1641745603180_diff()
+    col = _FakeCollection(diff.field_names)
+    col.add(MockNote(1641745603180, [diff.original_fields[f] for f in diff.field_names], diff.original_tags))
+
+    note = col.get_note(1641745603180)
+    editor = _BridgeAwareEditor(note, col)
+
+    class FakeBrowser(QtWidgets.QMainWindow):
+        def __init__(self):
+            super().__init__()
+            self.table = QtWidgets.QTableView(self)
+            self.editor = editor
+            self.col = col
+
+        def selected_notes(self):
+            return [1641745603180]
+
+    bi.set_pending_diffs([diff], lambda x: None)
+    browser = FakeBrowser()
+    qtbot.addWidget(browser)
+
+    try:
+        # Créer le panel sans avoir encore appelé _on_editor_did_load_note (simule le timing pendant loadNote)
+        editor.note = None
+        panel = DiffBrowserPanel(browser)
+        bi._browser_panel = panel
+        panel.select_note(1641745603180)
+
+        # Anki assigne editor.note avec les champs d'origine (pré-sync) et un événement arrive avant oncallback
+        editor.note = col.get_note(1641745603180)
+        bi._diff_save_current_note(editor)
+        gui_hooks.editor_did_unfocus_field(False, editor.note, 2)
+        if hasattr(gui_hooks, "editor_did_fire_typing_timer"):
+            gui_hooks.editor_did_fire_typing_timer(editor.note)
+
+        # Les propositions d'import doivent être intactes et le badge doit rester 'Accepté'
+        assert diff.merged_fields["Infos supp"] == diff.updated_fields["Infos supp"]
+        assert diff.merged_fields["References"] == diff.updated_fields["References"]
+        assert not diff.custom_edit_fields
+        note_panel = panel._note_panels[1641745603180]
+        assert note_panel._field_panels["Infos supp"]._badge.text() == "Accepté"
+        assert note_panel._field_panels["References"]._badge.text() == "Accepté"
+
+        # Quand _on_editor_did_load_note finit par arriver, l'éditeur reçoit bien les propositions
+        bi._on_editor_did_load_note(editor)
+        assert editor.note.fields[2] == diff.updated_fields["Infos supp"]
+        assert editor.note.fields[3] == diff.updated_fields["References"]
+        assert note_panel._field_panels["Infos supp"]._badge.text() == "Accepté"
+    finally:
+        bi.clear_pending_diffs()
+        bi._browser_panel = None
+
+
+
 
 

@@ -636,8 +636,8 @@ class AnkiCollabHistoryPanel(QtWidgets.QWidget):
     version_retrieved = _Signal(dict)
     fields_protected = _Signal(dict)
     protection_tags_applied = _Signal(list)
-    _scan_progress_sig = _Signal(int, int, int, int, bool)
-    _scan_finished_sig = _Signal(int, int, bool)
+    _scan_progress_sig = _Signal(object, int, int, int, bool, int)
+    _scan_finished_sig = _Signal(object, int, bool, int)
     _instances: List[weakref.ref[AnkiCollabHistoryPanel]] = []
 
     def __init__(
@@ -662,13 +662,23 @@ class AnkiCollabHistoryPanel(QtWidgets.QWidget):
         self._is_scanning_backups = False
         self._scan_note_id: Optional[int] = None
         self._scan_cancel_event: Optional[threading.Event] = None
+        self._scan_cancel_holder: List[Optional[threading.Event]] = [None]
+        self._scan_gen: int = 0
         self._status_clear_timer = QtCore.QTimer(self)
         self._status_clear_timer.setSingleShot(True)
         self._status_clear_timer.timeout.connect(self._clear_scan_status_if_idle)
 
         self._scan_progress_sig.connect(self._on_scan_progress)
         self._scan_finished_sig.connect(self._on_scan_finished)
-        self.destroyed.connect(self._cancel_active_scan)
+
+        cancel_holder = self._scan_cancel_holder
+
+        def _cancel_on_destroy(_obj=None, holder=cancel_holder):
+            ev = holder[0]
+            if ev is not None:
+                ev.set()
+
+        self.destroyed.connect(_cancel_on_destroy)
 
         AnkiCollabHistoryPanel._instances = [ref for ref in AnkiCollabHistoryPanel._instances if ref() is not None]
         AnkiCollabHistoryPanel._instances.append(weakref.ref(self))
@@ -883,7 +893,12 @@ class AnkiCollabHistoryPanel(QtWidgets.QWidget):
         self._list.clear()
 
         if not self._history_deltas:
-            empty = QtWidgets.QListWidgetItem("  Aucun historique disponible")
+            placeholder_txt = (
+                "  Recherche dans les sauvegardes..."
+                if self._is_scanning_backups
+                else "  Aucun historique disponible"
+            )
+            empty = QtWidgets.QListWidgetItem(placeholder_txt)
             empty.setFlags(_Qt.ItemFlag.NoItemFlags)
             empty.setForeground(QtGui.QColor(str(_CLR_SUBTEXT)))
             self._list.addItem(empty)
@@ -964,8 +979,12 @@ class AnkiCollabHistoryPanel(QtWidgets.QWidget):
 
         if not self._selected_delta:
             self._banner_frame.setVisible(False)
+            if self._is_scanning_backups and not self._history_deltas:
+                msg = "Recherche des versions antérieures dans les sauvegardes Anki..."
+            else:
+                msg = "Sélectionnez une version dans la liste"
             placeholder = QtWidgets.QLabel(
-                f"<i style='color:{_CLR_SUBTEXT};'>Sélectionnez une version dans la liste</i>"
+                f"<i style='color:{_CLR_SUBTEXT};'>{msg}</i>"
             )
             placeholder.setAlignment(_Qt.AlignmentFlag.AlignCenter)
             placeholder.setStyleSheet("background: transparent;")
@@ -1118,6 +1137,8 @@ class AnkiCollabHistoryPanel(QtWidgets.QWidget):
     def _cancel_active_scan(self):
         if self._scan_cancel_event is not None:
             self._scan_cancel_event.set()
+        if self._scan_cancel_holder[0] is not None:
+            self._scan_cancel_holder[0].set()
 
     def _clear_scan_status_if_idle(self):
         if not self._is_scanning_backups:
@@ -1133,11 +1154,22 @@ class AnkiCollabHistoryPanel(QtWidgets.QWidget):
         self._status_clear_timer.stop()
         self._is_scanning_backups = True
         self._scan_note_id = note_id
+        self._scan_gen += 1
+        scan_gen = self._scan_gen
         cancel_ev = threading.Event()
         self._scan_cancel_event = cancel_ev
+        self._scan_cancel_holder[0] = cancel_ev
         self._scan_status_lbl.setText("Recherche dans les sauvegardes Anki...")
+        if not self._history_deltas:
+            self._populate_list()
 
         last_found = [0]
+
+        def _safe_emit(sig, *args):
+            try:
+                sig.emit(*args)
+            except RuntimeError:
+                cancel_ev.set()
 
         def _bg_scan():
             def _progress(curr, tot, found):
@@ -1145,7 +1177,7 @@ class AnkiCollabHistoryPanel(QtWidgets.QWidget):
                     return
                 has_new = found > last_found[0]
                 last_found[0] = found
-                self._scan_progress_sig.emit(note_id, curr, tot, found, has_new)
+                _safe_emit(self._scan_progress_sig, note_id, curr, tot, found, has_new, scan_gen)
 
             try:
                 self._history_db.scan_backups_for_note(
@@ -1155,24 +1187,43 @@ class AnkiCollabHistoryPanel(QtWidgets.QWidget):
                 )
             except Exception as e:
                 print(f"[anki-diff] Error scanning backups: {e}")
+            finally:
+                close_conn = getattr(self._history_db, "close_thread_connection", None)
+                if callable(close_conn):
+                    close_conn()
 
-            self._scan_finished_sig.emit(note_id, last_found[0], cancel_ev.is_set())
+            _safe_emit(self._scan_finished_sig, note_id, last_found[0], cancel_ev.is_set(), scan_gen)
 
         threading.Thread(target=_bg_scan, daemon=True).start()
 
-    def _on_scan_progress(self, note_id: int, curr: int, tot: int, found: int, has_new: bool):
-        if note_id != self._note_id:
+    def _on_scan_progress(
+        self,
+        note_id: int,
+        curr: int,
+        tot: int,
+        found: int,
+        has_new: bool,
+        scan_gen: Optional[int] = None,
+    ):
+        if note_id != self._note_id or (scan_gen is not None and scan_gen != self._scan_gen):
             return
         self._scan_status_lbl.setText(f"Recherche ({curr}/{tot})... {found} version(s) trouvée(s)")
         if has_new:
             self._load_data(preserve_selection=True)
 
-    def _on_scan_finished(self, note_id: int, found: int, cancelled: bool):
-        if note_id != self._note_id:
+    def _on_scan_finished(
+        self,
+        note_id: int,
+        found: int,
+        cancelled: bool,
+        scan_gen: Optional[int] = None,
+    ):
+        if note_id != self._note_id or (scan_gen is not None and scan_gen != self._scan_gen):
             return
         self._is_scanning_backups = False
         self._scan_note_id = None
         self._scan_cancel_event = None
+        self._scan_cancel_holder[0] = None
         if cancelled:
             self._scan_status_lbl.setText(f"Recherche arrêtée ({found} version(s) trouvée(s)).")
         elif found > 0:
@@ -1320,3 +1371,7 @@ class AnkiCollabHistoryDialog(QtWidgets.QDialog):
     @property
     def panel(self) -> AnkiCollabHistoryPanel:
         return self._panel
+
+    def done(self, r: int) -> None:
+        self._panel._cancel_active_scan()
+        super().done(r)

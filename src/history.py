@@ -182,6 +182,21 @@ class NoteHistoryDB:
                 self._connections.append(conn)
         return conn
 
+    def close_thread_connection(self) -> None:
+        """Ferme et libère la connexion SQLite du thread courant."""
+        conn = getattr(self._local, "conn", None)
+        if conn is not None:
+            self._local.conn = None
+            with self._connections_lock:
+                try:
+                    self._connections.remove(conn)
+                except ValueError:
+                    pass
+            try:
+                conn.close()
+            except Exception:
+                pass
+
     def close(self) -> None:
         """Ferme proprement le worker et toutes les connexions SQLite ouvertes."""
         self._closed = True
