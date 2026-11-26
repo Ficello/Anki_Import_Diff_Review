@@ -137,36 +137,80 @@ _SET_FIELD_JS = """
 """
 
 _SET_FIELDS_BATCH_JS = """
-(function(fieldsMap) {
-    var results = {};
+(function(fieldsMap, expectedNoteId) {
+    var mySeq = (window._anki_diff_sync_seq = (window._anki_diff_sync_seq || 0) + 1);
+    if (window._anki_diff_set_fields_timer) {
+        clearTimeout(window._anki_diff_set_fields_timer);
+        window._anki_diff_set_fields_timer = null;
+    }
 
-    function updateSingleField(fieldIdx, htmlValue) {
+    function isNoteMismatch() {
+        if (expectedNoteId !== null && expectedNoteId !== undefined && typeof globalThis.getNoteId === "function") {
+            try {
+                var curNid = globalThis.getNoteId();
+                if (curNid !== null && curNid !== undefined && curNid !== expectedNoteId) {
+                    return true;
+                }
+            } catch(eN) {}
+        }
+        return false;
+    }
+
+    var hasNoteEditor = false;
+    try {
+        if (typeof require === "function") {
+            var neMod = require("anki/NoteEditor");
+            if (neMod && neMod.instances) {
+                hasNoteEditor = true;
+            }
+        }
+    } catch(eNe) {}
+
+    var hasAnkiUiLoaded = false;
+    try {
+        if (typeof require === "function") {
+            var uiMod = require("anki/ui");
+            if (uiMod && uiMod.loaded && typeof uiMod.loaded.then === "function") {
+                hasAnkiUiLoaded = true;
+            }
+        }
+    } catch(eUi) {}
+
+    function updateSingleField(fieldIdx, htmlValue, allowDomFallback) {
         // Tentative 1 : NoteEditor moderne (Anki Svelte / ProseMirror >= 2.1.55 / 24+ / 25+ / 26+)
         try {
             var ni = (typeof require === "function") ? require("anki/NoteEditor").instances : null;
-            if (ni && ni[0] && ni[0].fields && ni[0].fields[fieldIdx]) {
+            if (ni && ni[0] && ni[0].fields && ni[0].fields.length > fieldIdx && Object.prototype.hasOwnProperty.call(ni[0].fields, fieldIdx)) {
                 var f = ni[0].fields[fieldIdx];
-                // 1a : f.content est le Svelte store direct
-                if (f.content && typeof f.content.set === "function") {
-                    f.content.set(htmlValue);
-                    return "ok:NoteEditor.field.content";
-                }
-                // 1b : f.editingArea.content
-                var area = f.editingArea;
-                if (area && area.content && typeof area.content.set === "function") {
-                    area.content.set(htmlValue);
-                    return "ok:NoteEditor.area.content";
-                }
-                // 1c : area.element ou f.element
-                var ce = (area && (area.element || area.$el)) || f.element;
-                if (ce) {
-                    ce.innerHTML = htmlValue;
-                    ce.dispatchEvent(new Event("input", { bubbles: true }));
-                    return "ok:NoteEditor.element";
+                if (f) {
+                    // 1a : f.content est le Svelte store direct
+                    if (f.content && typeof f.content.set === "function") {
+                        f.content.set(htmlValue);
+                        return "ok:NoteEditor.field.content";
+                    }
+                    // 1b : f.editingArea.content
+                    var area = f.editingArea;
+                    if (area && area.content && typeof area.content.set === "function") {
+                        area.content.set(htmlValue);
+                        return "ok:NoteEditor.area.content";
+                    }
+                    if (allowDomFallback) {
+                        // 1c : area.element ou f.element
+                        var ce = (area && (area.element || area.$el)) || f.element;
+                        if (ce) {
+                            ce.innerHTML = htmlValue;
+                            ce.dispatchEvent(new Event("input", { bubbles: true }));
+                            return "ok:NoteEditor.element";
+                        }
+                    }
                 }
             }
         } catch(e) {
             console.log("anki-diff NoteEditor err:", e);
+        }
+
+        if (!allowDomFallback && (hasNoteEditor || hasAnkiUiLoaded)) {
+            return "pending:not_mounted";
         }
 
         // Tentative 2 : anki-editable avec support Shadow DOM (Web Components)
@@ -224,65 +268,101 @@ _SET_FIELDS_BATCH_JS = """
         return "error:not_found";
     }
 
-    for (var idxStr in fieldsMap) {
-        if (!Object.prototype.hasOwnProperty.call(fieldsMap, idxStr)) continue;
-        var fieldIdx = parseInt(idxStr, 10);
-        var htmlValue = fieldsMap[idxStr];
-        results[fieldIdx] = updateSingleField(fieldIdx, htmlValue);
+    function runBatch(attempt) {
+        if (window._anki_diff_sync_seq !== mySeq) {
+            return "cancelled:superseded";
+        }
+        if (isNoteMismatch()) {
+            return "skipped:note_mismatch";
+        }
+
+        var results = {};
+        var allowDomFallback = (attempt >= 25) || (!hasNoteEditor && !hasAnkiUiLoaded);
+        var needsRetry = false;
+
+        for (var idxStr in fieldsMap) {
+            if (!Object.prototype.hasOwnProperty.call(fieldsMap, idxStr)) continue;
+            var fieldIdx = parseInt(idxStr, 10);
+            var htmlValue = fieldsMap[idxStr];
+            var res = updateSingleField(fieldIdx, htmlValue, allowDomFallback);
+            results[fieldIdx] = res;
+            if (res === "pending:not_mounted") {
+                needsRetry = true;
+            }
+        }
+
+        if (needsRetry && attempt < 25) {
+            window._anki_diff_set_fields_timer = setTimeout(function() {
+                window._anki_diff_set_fields_timer = null;
+                runBatch(attempt + 1);
+            }, 30);
+            return "pending";
+        }
+
+        // Tentative de secours globale : globalThis.setFields si un champ a échoué
+        try {
+            var hasFailure = false;
+            for (var k in results) {
+                if (typeof results[k] === "string" && results[k].indexOf("error") !== -1) {
+                    hasFailure = true;
+                    break;
+                }
+            }
+            if (hasFailure && typeof globalThis.setFields === "function") {
+                var ni = (typeof require === "function") ? require("anki/NoteEditor").instances : null;
+                if (ni && ni[0] && ni[0].fields) {
+                    var fCount = ni[0].fields.length || Object.keys(ni[0].fields).length;
+                    var allNames = [];
+                    var allVals = [];
+                    var allData = [];
+                    for (var i = 0; i < fCount; i++) {
+                        var fi = Object.prototype.hasOwnProperty.call(ni[0].fields, i) ? ni[0].fields[i] : null;
+                        var fn = (fi && fi.name) || ("f" + i);
+                        var fv = (fieldsMap[i] !== undefined) ? fieldsMap[i] : null;
+                        if (fv === null && fi && fi.content) {
+                            try {
+                                fv = fi.content.get ? fi.content.get() : "";
+                            } catch(e2) { fv = ""; }
+                        }
+                        var finalVal = fv !== null ? fv : "";
+                        allNames.push(fn);
+                        allVals.push(finalVal);
+                        allData.push([fn, finalVal]);
+                    }
+                    var sfArity = (typeof globalThis._ednSetFieldsArity === "number")
+                        ? globalThis._ednSetFieldsArity
+                        : globalThis.setFields.length;
+                    if (sfArity === 1) {
+                        globalThis.setFields(allData);
+                    } else {
+                        globalThis.setFields(allNames, allVals);
+                    }
+                }
+            }
+        } catch(eG) {}
+
+        // Maintenir le focus sur le champ actif si un champ était sélectionné
+        try {
+            var ni2 = (typeof require === "function") ? require("anki/NoteEditor").instances : null;
+            var cf = (ni2 && ni2[0] && ni2[0].focusedField) ? (ni2[0].focusedField.get ? ni2[0].focusedField.get() : ni2[0].focusedField) : null;
+            if (typeof cf === "number" && typeof globalThis.focusField === "function") {
+                globalThis.focusField(cf);
+            }
+        } catch(eF) {}
+
+        return results;
     }
 
-    // Tentative de secours globale : globalThis.setFields si un champ a échoué
-    try {
-        var hasFailure = false;
-        for (var k in results) {
-            if (typeof results[k] === "string" && results[k].indexOf("error") !== -1) {
-                hasFailure = true;
-                break;
-            }
-        }
-        if (hasFailure && typeof globalThis.setFields === "function") {
-            var ni = (typeof require === "function") ? require("anki/NoteEditor").instances : null;
-            if (ni && ni[0] && ni[0].fields) {
-                var fCount = Object.keys(ni[0].fields).length;
-                var allNames = [];
-                var allVals = [];
-                var allData = [];
-                for (var i = 0; i < fCount; i++) {
-                    var fn = (ni[0].fields[i] && ni[0].fields[i].name) || ("f" + i);
-                    var fv = (fieldsMap[i] !== undefined) ? fieldsMap[i] : null;
-                    if (fv === null && ni[0].fields[i] && ni[0].fields[i].content) {
-                        try {
-                            fv = ni[0].fields[i].content.get ? ni[0].fields[i].content.get() : "";
-                        } catch(e2) { fv = ""; }
-                    }
-                    var finalVal = fv !== null ? fv : "";
-                    allNames.push(fn);
-                    allVals.push(finalVal);
-                    allData.push([fn, finalVal]);
-                }
-                var sfArity = (typeof globalThis._ednSetFieldsArity === "number")
-                    ? globalThis._ednSetFieldsArity
-                    : globalThis.setFields.length;
-                if (sfArity === 1) {
-                    globalThis.setFields(allData);
-                } else {
-                    globalThis.setFields(allNames, allVals);
-                }
-            }
-        }
-    } catch(eG) {}
+    if (hasAnkiUiLoaded) {
+        require("anki/ui").loaded.then(function() {
+            if (window._anki_diff_sync_seq !== mySeq) return;
+            runBatch(0);
+        });
+        return "scheduled";
+    }
 
-    // Maintenir le focus sur le champ actif si un champ était sélectionné
-    try {
-        var ni2 = (typeof require === "function") ? require("anki/NoteEditor").instances : null;
-        var cf = (ni2 && ni2[0] && ni2[0].focusedField) ? (ni2[0].focusedField.get ? ni2[0].focusedField.get() : ni2[0].focusedField) : null;
-        if (typeof cf === "number" && typeof globalThis.focusField === "function") {
-            globalThis.focusField(cf);
-        }
-    } catch(eF) {}
-
-    return results;
-})(%s);
+    return runBatch(0);
+})(%s, %s);
 """
 
 _HIGHLIGHT_MODIFIED_FIELDS_JS = """
@@ -628,16 +708,21 @@ def _escape_for_editor_js(editor, html_val: str) -> str:
 
 
 def _make_mark_js_done_cb(diff: "NoteDiff", expected_snapshot: dict[str, str]):
-    def _mark_js_done() -> None:
+    def _mark_js_done(result=None) -> None:
         in_flight = getattr(diff, "_in_flight_sync_fields", None)
         if not isinstance(in_flight, dict):
             return
         now_t = time.monotonic()
+        is_deferred = result in ("scheduled", "pending")
         for fname, exp_val in expected_snapshot.items():
             entry = in_flight.get(fname)
             if entry and entry.get("expected") == exp_val:
-                entry["js_done"] = True
-                entry["deadline"] = now_t + 0.15
+                if is_deferred:
+                    entry["js_done"] = False
+                    entry["deadline"] = max(entry.get("deadline", 0.0), now_t + 0.8)
+                else:
+                    entry["js_done"] = True
+                    entry["deadline"] = now_t + 0.15
     return _mark_js_done
 
 
@@ -693,6 +778,8 @@ def sync_editor_from_hunks(
                 print(f"[anki-diff] sync_editor_from_hunks skipped: editor note={note_id} != diff.note_id={diff.note_id}")
             return
 
+    expected_nid = note_id if note_id else (getattr(diff, "staged_note_id", 0) or getattr(diff, "note_id", None) or None)
+
     diff._syncing_to_editor = True
     diff._last_sync_time = time.monotonic()
     try:
@@ -720,7 +807,7 @@ def sync_editor_from_hunks(
                     if note and hasattr(note, "fields") and idx < len(note.fields):
                         note.fields[idx] = old_val
                 if fields_to_sync:
-                    js = _SET_FIELDS_BATCH_JS % json.dumps(fields_to_sync)
+                    js = _SET_FIELDS_BATCH_JS % (json.dumps(fields_to_sync), json.dumps(expected_nid))
                     _eval_js(editor, js, on_complete=_make_mark_js_done_cb(diff, expected_snapshot))
                 if only_fields is None:
                     clear_field_highlights(editor)
@@ -804,7 +891,7 @@ def sync_editor_from_hunks(
             expected_snapshot[field_name] = merged_val
 
         if fields_to_sync:
-            js = _SET_FIELDS_BATCH_JS % json.dumps(fields_to_sync)
+            js = _SET_FIELDS_BATCH_JS % (json.dumps(fields_to_sync), json.dumps(expected_nid))
             _eval_js(editor, js, on_complete=_make_mark_js_done_cb(diff, expected_snapshot))
 
         # Synchroniser les tags dans l'éditeur si demandés
@@ -864,10 +951,15 @@ def clear_field_highlights(editor) -> None:
 
 def _eval_js(editor, js: str, on_complete=None) -> None:
     """Evalue du JS dans le webview de l'éditeur, avec logging du résultat."""
-    def _finish():
+    def _finish(result=None):
         if on_complete is not None:
             try:
-                on_complete()
+                on_complete(result)
+            except TypeError:
+                try:
+                    on_complete()
+                except Exception:
+                    pass
             except Exception:
                 pass
 
@@ -878,7 +970,7 @@ def _eval_js(editor, js: str, on_complete=None) -> None:
                 print(f"[anki-diff] JS sync failed: {result}")
             elif result and _DEBUG_SYNC:
                 print(f"[anki-diff] JS sync ok: {result}")
-            _finish()
+            _finish(result)
         editor.web.evalWithCallback(js, _log_result)
     except AttributeError:
         # evalWithCallback pas dispo — fallback eval()
@@ -886,9 +978,9 @@ def _eval_js(editor, js: str, on_complete=None) -> None:
             editor.web.eval(js)
         except Exception:
             pass
-        _finish()
+        _finish(None)
     except Exception:
-        _finish()
+        _finish(None)
 
 
 # ---------------------------------------------------------------------------

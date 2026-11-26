@@ -2,10 +2,20 @@ import aqt
 import threading
 import json
 import weakref
+from datetime import datetime
 from typing import Callable, Any, List
 from .savepoint import NoteDiff, capture_import_changes
 from .ui import show_diff_dialog
-from .browser_integration import open_browser_diff, setup_native_integration
+from .browser_integration import (
+    open_browser_diff,
+    setup_native_integration,
+    is_diff_session_active,
+    resume_saved_diff_session,
+    rollback_saved_diff_session,
+    _persist_active_session,
+    set_profile_closing,
+)
+from .session_recovery import load_saved_session, clear_saved_session
 
 _active_import_dialogs = []
 
@@ -254,8 +264,98 @@ def setup_hooks() -> None:
         _wrap_flask_handlers_once()
 
 
+def _check_and_prompt_session_recovery() -> None:
+    """Détecte au démarrage une session Diff Hunk interrompue par un crash et propose reprise ou restauration."""
+    mw = getattr(aqt, "mw", None)
+    if mw is None or getattr(mw, "col", None) is None:
+        return
+    if is_diff_session_active():
+        return
+
+    session = load_saved_session()
+    if not session:
+        return
+
+    diffs = session.get("diffs") or []
+    updates = sum(1 for d in diffs if getattr(d, "action", "") == "UPDATE")
+    inserts = sum(1 for d in diffs if getattr(d, "action", "") == "INSERT")
+
+    saved_ts = session.get("saved_at", 0)
+    try:
+        dt_str = datetime.fromtimestamp(float(saved_ts)).strftime("%d/%m/%Y %H:%M") if saved_ts else "inconnue"
+    except Exception:
+        dt_str = "inconnue"
+
+    parts = []
+    if updates:
+        parts.append(f"{updates} note(s) modifiée(s)")
+    if inserts:
+        parts.append(f"{inserts} nouvelle(s) note(s)")
+    summary = ", ".join(parts) if parts else f"{len(diffs)} note(s)"
+
+    if session.get("auto_resume"):
+        if resume_saved_diff_session(session):
+            try:
+                aqt.utils.tooltip(f"Reprise de la révision Diff Import en attente ({summary}).")
+            except Exception:
+                pass
+        else:
+            try:
+                aqt.utils.tooltip("Aucune note valide à reprendre ; session nettoyée.")
+            except Exception:
+                pass
+        return
+
+    try:
+        from PyQt6 import QtWidgets
+    except ImportError:
+        from PySide6 import QtWidgets
+
+    parent = mw if isinstance(mw, QtWidgets.QWidget) else None
+    box = QtWidgets.QMessageBox(parent)
+    box.setIcon(QtWidgets.QMessageBox.Icon.Warning)
+    box.setWindowTitle("Session Diff Import interrompue détectée")
+    box.setText(
+        f"Une session de révision Diff Hunk a été interrompue avant sa validation "
+        f"(dernière sauvegarde : {dt_str}).\n\n"
+        f"Contenu en attente : {summary}.\n\n"
+        f"Que souhaitez-vous faire ?"
+    )
+    btn_resume = box.addButton("Reprendre la révision", QtWidgets.QMessageBox.ButtonRole.AcceptRole)
+    btn_rollback = box.addButton("Annuler et restaurer l'état initial", QtWidgets.QMessageBox.ButtonRole.DestructiveRole)
+    btn_ignore = box.addButton("Ignorer (garder l'état actuel)", QtWidgets.QMessageBox.ButtonRole.RejectRole)
+    box.setDefaultButton(btn_resume)
+    box.exec()
+
+    clicked = box.clickedButton()
+    if clicked is btn_resume:
+        if not resume_saved_diff_session(session):
+            try:
+                aqt.utils.tooltip("Aucune note valide à reprendre ; session nettoyée.")
+            except Exception:
+                pass
+    elif clicked is btn_rollback:
+        restored, removed = rollback_saved_diff_session(session)
+        try:
+            aqt.utils.tooltip(
+                f"Session annulée : {restored} note(s) restaurée(s), {removed} nouvelle(s) note(s) supprimée(s)."
+            )
+        except Exception:
+            pass
+        try:
+            mw.reset()
+        except Exception:
+            pass
+    elif clicked is btn_ignore:
+        clear_saved_session()
+
+
 def _on_profile_did_open() -> None:
     """Réinitialise NoteHistoryDB pour pointer sur le profil actif."""
+    try:
+        set_profile_closing(False)
+    except Exception:
+        pass
     try:
         from .history import NoteHistoryDB
         NoteHistoryDB.reset_instance()
@@ -270,9 +370,28 @@ def _on_profile_did_open() -> None:
     except Exception as e:
         print("[anki-diff] setup_ankicollab_hook on profile open error:", e)
 
+    try:
+        try:
+            from PyQt6 import QtCore
+        except ImportError:
+            from PySide6 import QtCore
+        if QtCore.QCoreApplication.instance() is not None:
+            QtCore.QTimer.singleShot(1500, _check_and_prompt_session_recovery)
+    except Exception as e:
+        print("[anki-diff] schedule session recovery check error:", e)
+
 
 def _on_profile_will_close() -> None:
     """Vide les snapshots en attente et libère immédiatement tous les verrous SQLite."""
+    try:
+        set_profile_closing(True)
+    except Exception:
+        pass
+    try:
+        if is_diff_session_active():
+            _persist_active_session(immediate=True)
+    except Exception as e:
+        print("[anki-diff] Error flushing active diff session on profile close:", e)
     try:
         flush_pending_history_snapshots()
     except Exception as e:

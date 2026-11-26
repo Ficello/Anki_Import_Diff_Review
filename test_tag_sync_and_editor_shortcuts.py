@@ -2266,6 +2266,105 @@ def test_unsynced_note_save_or_typing_before_load_does_not_mark_prop_modified(qt
         bi._browser_panel = None
 
 
+def test_set_fields_batch_js_waits_for_anki_ui_and_guards_proxy():
+    """Vérifie que _SET_FIELDS_BATCH_JS attend require('anki/ui').loaded, protège le Proxy Nk()
+    via fields.length, gère la séquence anti-collision et le contrôle d'ID de note."""
+    from src.editor_sync import _SET_FIELDS_BATCH_JS
+
+    assert 'require("anki/ui")' in _SET_FIELDS_BATCH_JS
+    assert "uiMod.loaded" in _SET_FIELDS_BATCH_JS
+    assert ".loaded.then(" in _SET_FIELDS_BATCH_JS
+    assert "ni[0].fields.length > fieldIdx" in _SET_FIELDS_BATCH_JS
+    assert "_anki_diff_sync_seq" in _SET_FIELDS_BATCH_JS
+    assert "globalThis.getNoteId" in _SET_FIELDS_BATCH_JS
+    assert 'require("anki/NoteEditor").instances' in _SET_FIELDS_BATCH_JS
+    assert "f.content.set" in _SET_FIELDS_BATCH_JS
+    assert "shadowRoot" in _SET_FIELDS_BATCH_JS
+    assert "globalThis.focusField" in _SET_FIELDS_BATCH_JS
+    assert "globalThis.setFields" in _SET_FIELDS_BATCH_JS
+    assert "globalThis._ednSetFieldsArity" in _SET_FIELDS_BATCH_JS
+
+
+def test_sync_editor_from_hunks_passes_expected_note_id():
+    """sync_editor_from_hunks doit transmettre l'ID de la note cible au JS batch."""
+    from src.editor_sync import sync_editor_from_hunks
+
+    diff = NoteDiff(
+        note_id=424242,
+        action="UPDATE",
+        model_name="Basic",
+        field_names=["Front", "Back"],
+        original_fields={"Front": "OldQ", "Back": "OldA"},
+        updated_fields={"Front": "NewQ", "Back": "OldA"},
+    )
+    fake_note = MagicMock()
+    fake_note.id = 424242
+    fake_note.fields = ["OldQ", "OldA"]
+    editor = MockEditor(fake_note)
+
+    sync_editor_from_hunks(editor, diff)
+
+    batch_calls = [js for js in editor.js_calls if "_anki_diff_sync_seq" in js]
+    assert len(batch_calls) == 1
+    assert "424242);" in batch_calls[0]
+
+
+def test_scheduled_js_result_keeps_in_flight_guard_for_stale_bridge_cmds():
+    """Quand evalWithCallback retourne 'scheduled', _in_flight_sync_fields doit conserver
+    js_done=False et une deadline >= 0.8s pour bloquer les commandes bridge périmées."""
+    import time
+    from src.editor_sync import sync_editor_from_hunks, should_drop_stale_editor_bridge_cmd
+
+    diff = NoteDiff(
+        note_id=555123,
+        action="UPDATE",
+        model_name="Basic",
+        field_names=["Front", "Back"],
+        original_fields={"Front": "OldQ", "Back": "OldA"},
+        updated_fields={"Front": "NewQ", "Back": "OldA"},
+    )
+    fake_note = MagicMock()
+    fake_note.id = 555123
+    fake_note.fields = ["OldQ", "OldA"]
+
+    editor = MockEditor(fake_note)
+
+    def _eval_scheduled(js, cb=None):
+        editor.js_calls.append(js)
+        if cb is not None:
+            cb("scheduled" if "_anki_diff_sync_seq" in js else "ok")
+
+    editor.web.evalWithCallback = _eval_scheduled
+
+    before = time.monotonic()
+    sync_editor_from_hunks(editor, diff)
+
+    in_flight = getattr(diff, "_in_flight_sync_fields", {})
+    assert "Front" in in_flight
+    entry = in_flight["Front"]
+    assert entry["js_done"] is False
+    assert entry["deadline"] >= before + 0.75
+
+    # Une commande bridge tardive contenant l'ancien champ doit être rejetée
+    assert should_drop_stale_editor_bridge_cmd(
+        editor,
+        "key:0:555123:OldQ",
+        lambda nid: diff if nid == 555123 else None,
+    ) is True
+    assert should_drop_stale_editor_bridge_cmd(
+        editor,
+        "blur:0:555123:OldQ",
+        lambda nid: diff if nid == 555123 else None,
+    ) is True
+    # En revanche, la valeur attendue ne doit pas être bloquée
+    assert should_drop_stale_editor_bridge_cmd(
+        editor,
+        "blur:0:555123:NewQ",
+        lambda nid: diff if nid == 555123 else None,
+    ) is False
+
+
+
 
 
 

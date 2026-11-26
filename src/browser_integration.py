@@ -35,7 +35,7 @@ import threading
 import time
 import weakref
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import aqt
 import aqt.gui_hooks as gui_hooks
@@ -52,6 +52,13 @@ except ImportError:
     _Signal = QtCore.Signal
 
 from .savepoint import NoteDiff, is_note_learned, get_learned_note_ids
+from .session_recovery import (
+    cancel_scheduled_save,
+    clear_saved_session,
+    load_saved_session,
+    save_pending_session,
+    schedule_session_save,
+)
 from .diff import compute_hunks, apply_hunks, DiffHunk
 from .ui import (
     HunkWidget, FieldDiffPanel, TagsDiffPanel, OldFieldsPanel, safe_timer_set_text,
@@ -91,6 +98,21 @@ _typing_edit_hook = None                    # hook editor_did_fire_typing_timer
 _tag_edit_hook = None                       # hook editor_did_update_tags
 _committed = False
 _staged_to_orig: Dict[int, int] = {}       # staged_note_id → original_note_id (pour INSERT pré-insérées)
+_profile_closing: bool = False
+_session_deferred_on_close: bool = False
+
+
+def set_profile_closing(closing: bool) -> None:
+    """Indique si le profil Anki est en cours de fermeture (Alt+F4 / Quitter)."""
+    global _profile_closing, _session_deferred_on_close
+    _profile_closing = bool(closing)
+    if not _profile_closing:
+        _session_deferred_on_close = False
+
+
+def is_profile_closing() -> bool:
+    """Retourne True si le profil Anki est en cours de fermeture."""
+    return _profile_closing
 
 
 def _get_editor_note(editor):
@@ -147,10 +169,11 @@ def _sync_editor_with_note(editor, target_note, fields_dict: Optional[Dict[str, 
 
 def set_pending_diffs(diffs: List[NoteDiff], on_commit, is_collab: Optional[bool] = None) -> None:
     """Enregistre les diffs à valider via le browser/éditeur natif."""
-    global _pending_diffs, _on_commit_cb, _committed, _staged_to_orig, _is_collab_session
+    global _pending_diffs, _on_commit_cb, _committed, _staged_to_orig, _is_collab_session, _session_deferred_on_close
     _pending_diffs = {d.note_id: d for d in diffs}
     _on_commit_cb = on_commit
     _committed = False
+    _session_deferred_on_close = False
     _is_collab_session = is_collab
     _staged_to_orig.clear()
 
@@ -180,19 +203,45 @@ def _remove_editor_edit_hooks() -> None:
         _tag_edit_hook = None
 
 
-def clear_pending_diffs() -> None:
+def _persist_active_session(immediate: bool = False, auto_resume: bool = False) -> None:
+    """Sauvegarde sur disque la session diff active (immédiatement ou avec debounce)."""
+    if _committed or not _pending_diffs:
+        return
+
+    def _do_save() -> None:
+        if _committed or not _pending_diffs:
+            return
+        save_pending_session(
+            _pending_diffs,
+            _staged_to_orig,
+            _is_collab_session,
+            auto_resume=auto_resume,
+        )
+
+    if immediate:
+        cancel_scheduled_save()
+        _do_save()
+    else:
+        schedule_session_save(_do_save, delay_ms=400)
+
+
+def clear_pending_diffs(preserve_saved_session: bool = False) -> None:
     global _pending_diffs, _on_commit_cb, _browser_panel, _staged_to_orig, _is_collab_session
-    try:
-        from .temp_link_interceptor import TempLinkInterceptor
-        interceptor = TempLinkInterceptor.instance()
-        if interceptor.is_active():
-            interceptor.on_diff_session_closed(committed=_committed)
-    except Exception:
-        pass
+    cancel_scheduled_save()
+    if not preserve_saved_session:
+        try:
+            from .temp_link_interceptor import TempLinkInterceptor
+            interceptor = TempLinkInterceptor.instance()
+            if interceptor.is_active():
+                interceptor.on_diff_session_closed(committed=_committed)
+        except Exception:
+            pass
     _pending_diffs.clear()
     _on_commit_cb = None
     _is_collab_session = None
     _staged_to_orig.clear()
+    if not preserve_saved_session:
+        clear_saved_session()
 
     # Retirer les hooks d'édition si installés
     _remove_editor_edit_hooks()
@@ -211,7 +260,7 @@ def clear_pending_diffs() -> None:
         except Exception:
             pass
         try:
-            panel.cleanup()
+            panel.cleanup(preserve_session=preserve_saved_session)
         except Exception:
             pass
         try:
@@ -219,6 +268,29 @@ def clear_pending_diffs() -> None:
                 panel.close()
         except Exception:
             pass
+
+
+def _defer_session_for_reopen(panel=None) -> None:
+    """
+    Sauvegarde la session diff en mode reprise automatique (auto_resume=True)
+    lorsque l'utilisateur annule la fermeture pendant que Anki quitte (Alt+F4),
+    puis détache le panneau sans effectuer de rollback.
+    """
+    global _session_deferred_on_close, _browser_panel
+    _session_deferred_on_close = True
+    _persist_active_session(immediate=True, auto_resume=True)
+    target_panel = panel if panel is not None else _browser_panel
+    if target_panel is not None:
+        try:
+            from aqt.qt import sip
+            if not sip.isdeleted(target_panel):
+                target_panel.cleanup(preserve_session=True)
+        except Exception:
+            try:
+                target_panel.cleanup(preserve_session=True)
+            except Exception:
+                pass
+    clear_pending_diffs(preserve_saved_session=True)
 
 
 def get_diff_for_note(note_id: int) -> Optional[NoteDiff]:
@@ -320,6 +392,73 @@ def _stage_insert_notes(diffs: List[NoteDiff]) -> List[int]:
             print(f"[anki-diff] Error starting temp_link_interceptor session: {e_interceptor}")
 
     return staged_nids
+
+
+def _note_exists_in_col(col: Any, nid: int) -> bool:
+    """Vérifie si une note existe toujours dans la collection (Anki réel ou mocks)."""
+    if not col or not nid:
+        return False
+    db = getattr(col, "db", None)
+    if db is not None:
+        try:
+            if hasattr(db, "scalar"):
+                return bool(db.scalar("SELECT 1 FROM notes WHERE id = ? LIMIT 1", nid))
+            if hasattr(db, "first"):
+                return bool(db.first("SELECT 1 FROM notes WHERE id = ? LIMIT 1", nid))
+            if hasattr(db, "all"):
+                return bool(db.all("SELECT 1 FROM notes WHERE id = ? LIMIT 1", nid))
+            if hasattr(db, "execute"):
+                cur = db.execute("SELECT 1 FROM notes WHERE id = ? LIMIT 1", nid)
+                return cur.fetchone() is not None
+        except Exception:
+            pass
+    try:
+        return col.get_note(nid) is not None
+    except Exception:
+        return False
+
+
+def _restore_update_notes_to_original(col: Any, diffs_iterable: Iterable[NoteDiff]) -> int:
+    """
+    Restaure les notes UPDATE fournies à leur état initial (champs et tags d'origine).
+    Retourne le nombre de notes effectivement restaurées en base.
+    """
+    if not col:
+        return 0
+    restored_count = 0
+    # IMPORTANT: ne pas utiliser col.db.execute("begin"/"commit") — conflit
+    # avec les transactions internes du backend Rust (update_note gère les siennes).
+    for diff in diffs_iterable:
+        if getattr(diff, "action", "") != "UPDATE":
+            continue
+        try:
+            note = col.get_note(diff.note_id)
+            model = col.models.get(note.mid)
+            if not model:
+                continue
+            field_indices = {f["name"]: idx for idx, f in enumerate(model.get("flds", []))}
+
+            modified = False
+            for name, orig_val in (diff.original_fields or {}).items():
+                idx = field_indices.get(name)
+                if idx is not None and idx < len(note.fields):
+                    if note.fields[idx] != orig_val:
+                        note.fields[idx] = orig_val
+                        modified = True
+            orig_tags = (
+                list(diff.original_tags)
+                if hasattr(diff, "original_tags") and diff.original_tags is not None
+                else []
+            )
+            if list(getattr(note, "tags", [])) != orig_tags:
+                note.tags = orig_tags
+                modified = True
+            if modified:
+                col.update_note(note)  # gère sa propre transaction Rust
+                restored_count += 1
+        except Exception:
+            pass
+    return restored_count
 
 
 def _unstage_insert_notes(diffs_dict: Dict[int, NoteDiff]) -> None:
@@ -1821,7 +1960,7 @@ class DiffBrowserPanel(QtWidgets.QWidget):
             pass
 
         try:
-            self.cleanup()
+            self.cleanup(preserve_session=bool(_profile_closing or _session_deferred_on_close))
         except Exception:
             pass
 
@@ -1900,7 +2039,7 @@ class DiffBrowserPanel(QtWidgets.QWidget):
             print(f"[anki-diff] _restore_browser_splitter failed: {e}")
 
 
-    def cleanup(self) -> None:
+    def cleanup(self, preserve_session: bool = False) -> None:
         """Disconnect signals and explicitly delete buttons to avoid PyQt6 wildcard disconnect warnings."""
         try:
             self._restore_browser_splitter()
@@ -1916,8 +2055,10 @@ class DiffBrowserPanel(QtWidgets.QWidget):
 
         # 1. Supprimer les notes INSERT pré-insérées (staged)
         # 2. Restaurer les notes UPDATE à leur état d'origine
+        # (sauf si la session est différée pour reprise automatique à la réouverture)
         global _committed, _pending_diffs
-        if not _committed and _pending_diffs:
+        keep_session = bool(preserve_session or _session_deferred_on_close)
+        if not _committed and _pending_diffs and not keep_session:
             # Supprimer les notes INSERT temporairement insérées
             try:
                 _unstage_insert_notes(_pending_diffs)
@@ -1938,34 +2079,7 @@ class DiffBrowserPanel(QtWidgets.QWidget):
             restored_count = 0
             try:
                 col = aqt.mw.col
-                # IMPORTANT: ne pas utiliser col.db.execute("begin"/"commit") — conflit
-                # avec les transactions internes du backend Rust (update_note gère les siennes).
-                for nid, diff in list(_pending_diffs.items()):
-                    if diff.action == "UPDATE":
-                        try:
-                            note = col.get_note(nid)
-                            model = col.models.get(note.mid)
-                            if not model:
-                                continue
-                            field_indices = {f["name"]: idx for idx, f in enumerate(model.get("flds", []))}
-
-                            # Restaurer chaque champ et les tags d'origine
-                            modified = False
-                            for name, orig_val in diff.original_fields.items():
-                                idx = field_indices.get(name)
-                                if idx is not None and idx < len(note.fields):
-                                    if note.fields[idx] != orig_val:
-                                        note.fields[idx] = orig_val
-                                        modified = True
-                            orig_tags = list(diff.original_tags) if hasattr(diff, "original_tags") and diff.original_tags is not None else []
-                            if list(getattr(note, "tags", [])) != orig_tags:
-                                note.tags = orig_tags
-                                modified = True
-                            if modified:
-                                col.update_note(note)  # gère sa propre transaction Rust
-                                restored_count += 1
-                        except Exception:
-                            pass
+                restored_count = _restore_update_notes_to_original(col, list(_pending_diffs.values()))
                 if restored_count > 0:
                     aqt.utils.tooltip(f"Review annulée. {restored_count} note(s) restaurée(s) à leur état initial.")
                 elif _pending_diffs:
@@ -1987,7 +2101,7 @@ class DiffBrowserPanel(QtWidgets.QWidget):
                 print("[anki-diff] Error during rollback of uncommitted changes:", e)
 
         # Clear pending diffs
-        clear_pending_diffs()
+        clear_pending_diffs(preserve_saved_session=keep_session)
 
         # Retirer les hooks d'édition si installés
         _remove_editor_edit_hooks()
@@ -2049,13 +2163,16 @@ class DiffBrowserPanel(QtWidgets.QWidget):
             except Exception:
                 pass
 
-        # Restaurer closeEvent et keyPressEvent d'origine sur le navigateur
+        # Restaurer closeEvent, closeWithCallback et keyPressEvent d'origine sur le navigateur
         browser = getattr(self, "_browser", None)
         if browser is not None:
             try:
                 if hasattr(browser, "_orig_diff_close_event") and browser._orig_diff_close_event is not None:
                     browser.closeEvent = browser._orig_diff_close_event
                     browser._orig_diff_close_event = None
+                if hasattr(browser, "_orig_diff_close_with_callback") and browser._orig_diff_close_with_callback is not None:
+                    browser.closeWithCallback = browser._orig_diff_close_with_callback
+                    browser._orig_diff_close_with_callback = None
                 if hasattr(browser, "_orig_diff_key_press_event") and browser._orig_diff_key_press_event is not None:
                     browser.keyPressEvent = browser._orig_diff_key_press_event
                     browser._orig_diff_key_press_event = None
@@ -2732,6 +2849,7 @@ class DiffBrowserPanel(QtWidgets.QWidget):
                 if target_diff is not None:
                     target_diff._synced_to_editor = False
                 self.select_note(nid)
+                _persist_active_session(immediate=False)
         except Exception as e:
             print(f"[anki-diff] _on_browser_row_changed error: {e}")
 
@@ -3203,6 +3321,7 @@ class DiffBrowserPanel(QtWidgets.QWidget):
             f"{included_notes}/{total} note(s) incluse(s)  ·  {accepted_hunks}/{total_hunks} hunks acceptés{filter_suffix}"
         )
         self._commit_btn.setEnabled(included_notes > 0)
+        _persist_active_session(immediate=False)
 
 
 # ---------------------------------------------------------------------------
@@ -4356,97 +4475,9 @@ def get_active_browser_panel() -> Optional[DiffBrowserPanel]:
     return None
 
 
-def open_browser_diff(diffs: List[NoteDiff], on_commit, is_collab: bool = False) -> None:
-    """
-    Ouvre l'explorateur Anki filtré sur les notes modifiées et attache
-    le DiffBrowserPanel. C'est le point d'entrée principal du workflow diff.
-
-    Les notes INSERT sont pré-insérées temporairement dans la collection pour
-    être visibles dans le browser. Elles sont supprimées si l'utilisateur annule.
-    """
-    global _browser_panel, _pending_diffs, _on_commit_cb, _is_collab_session
-
-    if not diffs:
-        return
-
-    incoming_nids = set(d.note_id for d in diffs)
-
-    # Vérifier si le panel existe encore côté C++ (peut être détruit si le browser a été fermé)
-    _panel_alive = _is_panel_alive(_browser_panel)
-    if not _panel_alive:
-        _browser_panel = None
-
-    # 1. Garde contre les appels concurrents / doublons :
-    # Si une session de diff est déjà active et visible dans l'explorateur
-    if _panel_alive and _pending_diffs:
-        current_nids = set(_pending_diffs.keys())
-        if incoming_nids and incoming_nids.issubset(current_nids):
-            print("[anki-diff] open_browser_diff: appel doublon ignoré, conservation de la session active.")
-            try:
-                browser = getattr(_browser_panel, "_browser", None) or aqt.dialogs.open("Browser", aqt.mw)
-                browser.activateWindow()
-                browser.raise_()
-            except Exception:
-                pass
-            return
-
-        # S'il s'agit de nouvelles notes complémentaires (ex. pull AnkiCollab multi-paquets) :
-        # Fusionner dans la session active sans détruire l'état de revue de l'utilisateur
-        new_diffs = [d for d in diffs if d.note_id not in _pending_diffs]
-        if new_diffs:
-            print(f"[anki-diff] open_browser_diff: fusion de {len(new_diffs)} nouvelles notes dans la session active.")
-            for d in new_diffs:
-                _pending_diffs[d.note_id] = d
-            _stage_insert_notes(new_diffs)
-
-            # Chaînage des callbacks de commit
-            old_cb = _on_commit_cb
-            new_cb = on_commit
-
-            def chained_on_commit(all_accepted):
-                if old_cb:
-                    try:
-                        old_cb([d for d in all_accepted if d.note_id in current_nids])
-                    except Exception as e_old:
-                        print(f"[anki-diff] Erreur callback commit précédent: {e_old}")
-                if new_cb:
-                    try:
-                        new_cb([d for d in all_accepted if d.note_id in incoming_nids])
-                    except Exception as e_new:
-                        print(f"[anki-diff] Erreur callback commit nouveau: {e_new}")
-
-            _on_commit_cb = chained_on_commit
-
-            search_nids = []
-            for d in _pending_diffs.values():
-                if d.action == "INSERT" and d.staged_note_id:
-                    search_nids.append(d.staged_note_id)
-                elif d.action != "INSERT":
-                    search_nids.append(d.note_id)
-            if not search_nids:
-                search_nids = list(_pending_diffs.keys())
-            search_str = "nid:" + ",".join(str(nid) for nid in search_nids)
-
-            browser = getattr(_browser_panel, "_browser", None) or aqt.dialogs.open("Browser", aqt.mw)
-            browser.search_for(search_str)
-            _browser_panel._update_status()
-            browser.activateWindow()
-            browser.raise_()
-            return
-
-    # 2. Si un ancien panel était vivant mais doit être réinitialisé :
-    # Nettoyer l'ancienne session AVANT d'enregistrer les nouveaux diffs
-    if _panel_alive and _browser_panel is not None:
-        try:
-            _browser_panel.cleanup()
-            _browser_panel.close()
-        except Exception:
-            pass
-        _browser_panel = None
-
-    # 3. Enregistrer les nouveaux diffs et pré-insérer les notes INSERT
-    set_pending_diffs(diffs, on_commit, is_collab=is_collab)
-    _stage_insert_notes(diffs)
+def _open_and_attach_browser_diff(diffs: List[NoteDiff], is_collab: bool = False) -> None:
+    """Ouvre l'explorateur Anki filtré sur `diffs` et y attache DiffBrowserPanel."""
+    global _browser_panel
 
     # Construire le filtre : utiliser les staged_note_id pour les INSERT, note_id pour le reste
     search_nids = []
@@ -4469,6 +4500,43 @@ def open_browser_diff(diffs: List[NoteDiff], on_commit, is_collab: bool = False)
     if editor:
         _inject_editor_web_shortcuts(editor)
 
+    # Intercepter la fermeture via closeWithCallback (utilisé par AnkiQt.unloadCollection / Alt+F4)
+    if hasattr(browser, "closeWithCallback"):
+        if getattr(browser, "_orig_diff_close_with_callback", None) is None:
+            browser._orig_diff_close_with_callback = browser.closeWithCallback
+        _orig_browser_close_with_callback = browser._orig_diff_close_with_callback
+
+        def _diff_browser_close_with_callback(onsuccess):
+            global _browser_panel, _committed, _pending_diffs
+            if _browser_panel is not None and not _committed and bool(_pending_diffs):
+                decision = prompt_diff_close_decision(browser, is_app_closing=_profile_closing)
+                if decision == "cancel":
+                    if _profile_closing:
+                        _defer_session_for_reopen(_browser_panel)
+                    else:
+                        return
+                elif decision == "commit":
+                    try:
+                        from aqt.qt import sip
+                        if not sip.isdeleted(_browser_panel):
+                            _browser_panel.apply_commit(close_browser=False)
+                    except Exception as e:
+                        print(f"[anki-diff] Error committing on closeWithCallback: {e}")
+                elif decision == "revert":
+                    try:
+                        from aqt.qt import sip
+                        if not sip.isdeleted(_browser_panel):
+                            _browser_panel.apply_rollback(close_browser=False)
+                    except Exception as e:
+                        print(f"[anki-diff] Error reverting on closeWithCallback: {e}")
+
+            if _orig_browser_close_with_callback:
+                return _orig_browser_close_with_callback(onsuccess)
+            if callable(onsuccess):
+                onsuccess()
+
+        browser.closeWithCallback = _diff_browser_close_with_callback
+
     # Intercepter la fermeture de la fenetre du navigateur (bouton X en haut)
     if getattr(browser, "_orig_diff_close_event", None) is None:
         browser._orig_diff_close_event = browser.closeEvent
@@ -4477,11 +4545,14 @@ def open_browser_diff(diffs: List[NoteDiff], on_commit, is_collab: bool = False)
     def _diff_browser_close(event):
         global _browser_panel, _committed, _pending_diffs
         if _browser_panel is not None and not _committed and bool(_pending_diffs):
-            decision = prompt_diff_close_decision(browser)
+            decision = prompt_diff_close_decision(browser, is_app_closing=_profile_closing)
             if decision == "cancel":
-                if event is not None:
-                    event.ignore()
-                return
+                if _profile_closing:
+                    _defer_session_for_reopen(_browser_panel)
+                else:
+                    if event is not None:
+                        event.ignore()
+                    return
             elif decision == "commit":
                 try:
                     from aqt.qt import sip
@@ -4497,15 +4568,16 @@ def open_browser_diff(diffs: List[NoteDiff], on_commit, is_collab: bool = False)
                 except Exception as e:
                     print(f"[anki-diff] Error reverting on close: {e}")
 
-        if _browser_panel is not None:
-            try:
-                from aqt.qt import sip
-                if not sip.isdeleted(_browser_panel):
-                    _browser_panel.cleanup()
-            except Exception:
-                pass
-            _browser_panel = None
-        clear_pending_diffs()
+        if not _session_deferred_on_close:
+            if _browser_panel is not None:
+                try:
+                    from aqt.qt import sip
+                    if not sip.isdeleted(_browser_panel):
+                        _browser_panel.cleanup()
+                except Exception:
+                    pass
+                _browser_panel = None
+            clear_pending_diffs()
         if _orig_browser_close:
             try:
                 _orig_browser_close(event)
@@ -4572,6 +4644,278 @@ def open_browser_diff(diffs: List[NoteDiff], on_commit, is_collab: bool = False)
     browser.activateWindow()
     browser.raise_()
 
+
+def open_browser_diff(diffs: List[NoteDiff], on_commit, is_collab: bool = False) -> None:
+    """
+    Ouvre l'explorateur Anki filtré sur les notes modifiées et attache
+    le DiffBrowserPanel. C'est le point d'entrée principal du workflow diff.
+
+    Les notes INSERT sont pré-insérées temporairement dans la collection pour
+    être visibles dans le browser. Elles sont supprimées si l'utilisateur annule.
+    """
+    global _browser_panel, _pending_diffs, _on_commit_cb, _is_collab_session
+
+    if not diffs:
+        return
+
+    incoming_nids = set(d.note_id for d in diffs)
+
+    # Vérifier si le panel existe encore côté C++ (peut être détruit si le browser a été fermé)
+    _panel_alive = _is_panel_alive(_browser_panel)
+    if not _panel_alive:
+        _browser_panel = None
+
+    # 1. Garde contre les appels concurrents / doublons :
+    # Si une session de diff est déjà active et visible dans l'explorateur
+    if _panel_alive and _pending_diffs:
+        current_nids = set(_pending_diffs.keys())
+        if incoming_nids and incoming_nids.issubset(current_nids):
+            if _on_commit_cb is None and on_commit is not None:
+                _on_commit_cb = on_commit
+            print("[anki-diff] open_browser_diff: appel doublon ignoré, conservation de la session active.")
+            try:
+                browser = getattr(_browser_panel, "_browser", None) or aqt.dialogs.open("Browser", aqt.mw)
+                browser.activateWindow()
+                browser.raise_()
+            except Exception:
+                pass
+            return
+
+        # S'il s'agit de nouvelles notes complémentaires (ex. pull AnkiCollab multi-paquets) :
+        # Fusionner dans la session active sans détruire l'état de revue de l'utilisateur
+        new_diffs = [d for d in diffs if d.note_id not in _pending_diffs]
+        if new_diffs:
+            print(f"[anki-diff] open_browser_diff: fusion de {len(new_diffs)} nouvelles notes dans la session active.")
+            for d in new_diffs:
+                _pending_diffs[d.note_id] = d
+            _stage_insert_notes(new_diffs)
+            _persist_active_session(immediate=True)
+
+            # Chaînage des callbacks de commit
+            old_cb = _on_commit_cb
+            new_cb = on_commit
+
+            def chained_on_commit(all_accepted):
+                if old_cb:
+                    try:
+                        old_cb([d for d in all_accepted if d.note_id in current_nids])
+                    except Exception as e_old:
+                        print(f"[anki-diff] Erreur callback commit précédent: {e_old}")
+                if new_cb:
+                    try:
+                        new_cb([d for d in all_accepted if d.note_id in incoming_nids])
+                    except Exception as e_new:
+                        print(f"[anki-diff] Erreur callback commit nouveau: {e_new}")
+
+            _on_commit_cb = chained_on_commit
+
+            search_nids = []
+            for d in _pending_diffs.values():
+                if d.action == "INSERT" and d.staged_note_id:
+                    search_nids.append(d.staged_note_id)
+                elif d.action != "INSERT":
+                    search_nids.append(d.note_id)
+            if not search_nids:
+                search_nids = list(_pending_diffs.keys())
+            search_str = "nid:" + ",".join(str(nid) for nid in search_nids)
+
+            browser = getattr(_browser_panel, "_browser", None) or aqt.dialogs.open("Browser", aqt.mw)
+            if getattr(_browser_panel, "_learned_cards_only", False):
+                _browser_panel._apply_learned_cards_filter(True)
+            else:
+                browser.search_for(search_str)
+                _browser_panel._update_status()
+            browser.activateWindow()
+            browser.raise_()
+            return
+
+    # 2. Si un ancien panel était vivant mais doit être réinitialisé :
+    # Nettoyer l'ancienne session AVANT d'enregistrer les nouveaux diffs
+    if _panel_alive and _browser_panel is not None:
+        try:
+            _browser_panel.cleanup()
+            _browser_panel.close()
+        except Exception:
+            pass
+        _browser_panel = None
+
+    # 2b. Si une session différée (auto_resume=True) existe sur disque (ex: pull au démarrage
+    # avant le timer de reprise), fusionner les diffs sauvegardés avec les nouveaux diffs.
+    col = getattr(aqt.mw, "col", None) if getattr(aqt, "mw", None) else None
+    saved_session = load_saved_session()
+    if saved_session and saved_session.get("auto_resume") and col is not None:
+        saved_valid, already_staged_map, need_staging = _prepare_saved_diffs_for_resume(saved_session, col)
+        if saved_valid:
+            saved_nids = {d.note_id for d in saved_valid}
+            new_incoming = [d for d in diffs if d.note_id not in saved_nids]
+            merged_diffs = list(saved_valid) + new_incoming
+            merged_collab = bool(is_collab or saved_session.get("is_collab", False))
+
+            set_pending_diffs(merged_diffs, on_commit, is_collab=merged_collab)
+            _staged_to_orig.update(already_staged_map)
+            to_stage = list(need_staging) + [d for d in new_incoming if d.action == "INSERT"]
+            if to_stage:
+                _stage_insert_notes(to_stage)
+            if _staged_to_orig:
+                try:
+                    from .temp_link_interceptor import start_diff_session
+                    start_diff_session(_staged_to_orig)
+                except Exception as e_interceptor:
+                    print(f"[anki-diff] Error restoring temp_link_interceptor on auto_resume merge: {e_interceptor}")
+            _persist_active_session(immediate=True)
+            _open_and_attach_browser_diff(merged_diffs, is_collab=merged_collab)
+            return
+
+    # 3. Enregistrer les nouveaux diffs et pré-insérer les notes INSERT
+    set_pending_diffs(diffs, on_commit, is_collab=is_collab)
+    _stage_insert_notes(diffs)
+    _persist_active_session(immediate=True)
+    _open_and_attach_browser_diff(diffs, is_collab=is_collab)
+
+
+def rollback_saved_diff_session(session: Dict[str, Any]) -> Tuple[int, int]:
+    """
+    Annule proprement une session diff interrompue par un crash :
+      1. Supprime les notes INSERT pré-insérées encore présentes en base ;
+      2. Nettoie les éventuels liens temporaires morts ;
+      3. Restaure les notes UPDATE à leur état initial ;
+      4. Supprime le fichier de session de reprise.
+    Retourne `(restored_updates, removed_inserts)`.
+    """
+    col = getattr(aqt.mw, "col", None) if getattr(aqt, "mw", None) else None
+    if not col:
+        return (0, 0)
+
+    diffs = session.get("diffs") or []
+    staged_map: Dict[int, int] = {}
+    for k, v in (session.get("staged_to_orig") or {}).items():
+        try:
+            staged_map[int(k)] = int(v)
+        except (TypeError, ValueError):
+            continue
+
+    staged_candidates = set()
+    for d in diffs:
+        if getattr(d, "action", "") == "INSERT" and getattr(d, "staged_note_id", 0):
+            staged_candidates.add(int(d.staged_note_id))
+    for sid in staged_map.keys():
+        if sid:
+            staged_candidates.add(int(sid))
+
+    existing_staged_ids = [sid for sid in sorted(staged_candidates) if _note_exists_in_col(col, sid)]
+    removed_inserts = 0
+    if existing_staged_ids:
+        try:
+            from .hooks import _safely_clear_editor_if_note_deleted
+            _safely_clear_editor_if_note_deleted(existing_staged_ids)
+        except Exception:
+            pass
+        try:
+            col.remove_notes(existing_staged_ids)
+            removed_inserts = len(existing_staged_ids)
+        except Exception as e:
+            print(f"[anki-diff] Error removing staged notes during crash rollback: {e}")
+
+    if staged_map:
+        try:
+            from .temp_link_interceptor import TempLinkInterceptor
+            interceptor = TempLinkInterceptor.instance()
+            interceptor.start_session(staged_map)
+            interceptor.on_diff_session_closed(col=col, committed=False)
+        except Exception as e_interceptor:
+            print(f"[anki-diff] Error cleaning temp links during crash rollback: {e_interceptor}")
+
+    restored_updates = _restore_update_notes_to_original(col, diffs)
+    clear_saved_session()
+    return (restored_updates, removed_inserts)
+
+
+def _prepare_saved_diffs_for_resume(
+    session: Dict[str, Any], col: Any
+) -> Tuple[List[NoteDiff], Dict[int, int], List[NoteDiff]]:
+    """
+    Valide les diffs sauvegardés contre la collection courante sans dupliquer les INSERT déjà staged.
+    Retourne `(valid_diffs, already_staged_map, need_staging)`.
+    """
+    raw_diffs = session.get("diffs") or []
+    saved_staged_map = session.get("staged_to_orig") or {}
+    orig_to_staged: Dict[int, int] = {}
+    for k, v in saved_staged_map.items():
+        try:
+            orig_to_staged[int(v)] = int(k)
+        except (TypeError, ValueError):
+            continue
+
+    valid_diffs: List[NoteDiff] = []
+    already_staged_map: Dict[int, int] = {}
+    need_staging: List[NoteDiff] = []
+
+    for diff in raw_diffs:
+        action = getattr(diff, "action", "UPDATE")
+        if action == "UPDATE":
+            if _note_exists_in_col(col, diff.note_id):
+                valid_diffs.append(diff)
+        elif action == "INSERT":
+            candidate_staged = int(
+                getattr(diff, "staged_note_id", 0)
+                or orig_to_staged.get(diff.note_id, 0)
+                or 0
+            )
+            if candidate_staged and _note_exists_in_col(col, candidate_staged):
+                diff.staged_note_id = candidate_staged
+                already_staged_map[candidate_staged] = int(diff.note_id)
+            else:
+                diff.staged_note_id = 0
+                need_staging.append(diff)
+            valid_diffs.append(diff)
+        else:
+            if _note_exists_in_col(col, diff.note_id):
+                valid_diffs.append(diff)
+
+    return valid_diffs, already_staged_map, need_staging
+
+
+def resume_saved_diff_session(session: Dict[str, Any]) -> bool:
+    """
+    Reprend une session diff interrompue par un crash sans dupliquer les notes INSERT
+    déjà pré-insérées, puis rouvre le navigateur sur les notes restantes.
+    """
+    global _browser_panel, _staged_to_orig
+
+    col = getattr(aqt.mw, "col", None) if getattr(aqt, "mw", None) else None
+    if not col:
+        return False
+
+    valid_diffs, already_staged_map, need_staging = _prepare_saved_diffs_for_resume(session, col)
+
+    if not valid_diffs:
+        clear_saved_session()
+        return False
+
+    if _is_panel_alive(_browser_panel) and _browser_panel is not None:
+        try:
+            _browser_panel.cleanup()
+            _browser_panel.close()
+        except Exception:
+            pass
+        _browser_panel = None
+
+    is_collab = bool(session.get("is_collab", False))
+    set_pending_diffs(valid_diffs, on_commit=None, is_collab=is_collab)
+    _staged_to_orig.update(already_staged_map)
+    if need_staging:
+        _stage_insert_notes(need_staging)
+    if _staged_to_orig:
+        try:
+            from .temp_link_interceptor import start_diff_session
+            start_diff_session(_staged_to_orig)
+        except Exception as e_interceptor:
+            print(f"[anki-diff] Error restoring temp_link_interceptor on resume: {e_interceptor}")
+
+    _persist_active_session(immediate=True)
+    _open_and_attach_browser_diff(valid_diffs, is_collab=is_collab)
+    return True
+
 _decision_hook = None  # Hook de test
 _empty_learned_hook = None  # Hook de test : callable retournant 'show_all', 'accept_all' ou 'cancel'
 _commit_confirmation_hook = None  # Hook de test : callable retournant bool (confirmed) ou tuple[bool, bool] (confirmed, accept_all_tags)
@@ -4621,9 +4965,11 @@ def apply_all_pending_import_tags() -> None:
             except Exception:
                 pass
         _browser_panel._update_status()
+    else:
+        _persist_active_session(immediate=False)
 
 
-def prompt_diff_close_decision(parent=None) -> str:
+def prompt_diff_close_decision(parent=None, is_app_closing: bool = False) -> str:
     """
     Affiche une notification sobre demandant a l'utilisateur s'il souhaite
     conserver les modifications effectuees ou revenir a l'etat anterieur a l'importation.
@@ -4661,10 +5007,15 @@ def prompt_diff_close_decision(parent=None) -> str:
         title_lbl.setStyleSheet(f"font-size: 13px; font-weight: 700; color: {_CLR_HDR_FG};")
         layout.addWidget(title_lbl)
 
-        info_lbl = QtWidgets.QLabel(
-            "Souhaitez-vous conserver les modifications effectuees dans votre collection "
+        info_text = (
+            "Anki est en cours de fermeture. Souhaitez-vous conserver les modifications effectuees, "
+            "revenir a l'etat anterieur, ou annuler pour reprendre cette revision automatiquement "
+            "a la reouverture d'Anki ?"
+            if is_app_closing
+            else "Souhaitez-vous conserver les modifications effectuees dans votre collection "
             "ou revenir a l'etat anterieur a l'importation ?"
         )
+        info_lbl = QtWidgets.QLabel(info_text)
         info_lbl.setWordWrap(True)
         info_lbl.setStyleSheet(f"font-size: 12px; color: {_CLR_TEXT};")
         layout.addWidget(info_lbl)
@@ -4707,7 +5058,9 @@ def prompt_diff_close_decision(parent=None) -> str:
         except Exception:
             pass
 
-        btn_cancel = QtWidgets.QPushButton("Annuler")
+        btn_cancel = QtWidgets.QPushButton(
+            "Annuler (reprendre à la réouverture)" if is_app_closing else "Annuler"
+        )
         btn_cancel.setCursor(QtGui.QCursor(_Qt.CursorShape.PointingHandCursor))
         btn_cancel.setFixedHeight(28)
         try:

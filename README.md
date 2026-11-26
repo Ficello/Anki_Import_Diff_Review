@@ -116,6 +116,18 @@ Diff Hunk provides first-class support for the official **AnkiCollab** add-on (I
 
 ---
 
+### 6. Crash Recovery for Interrupted Diff Sessions
+
+If Anki terminates unexpectedly (for example due to a native `QtWebEngineCore` crash) while a Diff Hunk review session is open:
+
+- Diff Hunk automatically persists the active review state (`diff_hunk_pending_session.json` in your Anki profile folder).
+- On the next Anki startup, a recovery prompt detects the interrupted session and lets you choose between:
+  - **Resume review**: Restores the browser diff view with your pending hunk/tag choices and already-staged notes intact (without duplicating `INSERT` notes).
+  - **Abort and restore initial state**: Removes temporarily staged `INSERT` notes and reverts modified `UPDATE` notes back to their original fields and tags.
+  - **Ignore**: Leaves the database as-is and clears the pending recovery marker.
+
+---
+
 ## Configuration Options
 
 Access settings through `Tools > Add-ons > Diff Hunk > Config`:
